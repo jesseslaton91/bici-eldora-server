@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION='v9-gate';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION='v10-gates';   // bump on each deploy so clients can confirm what's live
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null;
 try {
@@ -59,7 +59,8 @@ const parties = new Map();
 const playerParty = new Map();
 const ROOM_SPAWN = {
   'wild':       { kinds: ['gnome','imp','kobold','boggart'], n: 6 },
-  'glades':     { kinds: ['kobold','boggart','redcap','wolf'], n: 9 },
+  // 'glades' (the EAST gate) removed — like westgate it runs client-side Warden waves, so the server
+  // no longer spawns its own monsters there (those were the invisible-to-the-player attackers).
   // 'westgate' removed: the gate is driven by the client-side Warden waves, so the server no longer
   // spawns its own (invisible-to-the-player) monsters there.
   'siege':      { kinds: ['redcap','boggart','gremlin'], n: 8 },
@@ -251,6 +252,10 @@ wss.on('connection', (ws)=>{
       if (Math.hypot(p.x-tgt.x, p.y-tgt.y) > HIT_RANGE) return;
       tgt.hp = Math.max(0, tgt.hp - Math.max(0, Math.min(DMG_CAP, +m.dmg||0)));
       if (tgt.hp <= 0){ broadcast(ws.room, { t:'pdeath', uid: tgt.uid, by: ws.uid }); tgt.hp = tgt.mh; }
+    }
+    else if (m.t === 'sethp' && ws.room){            // client healed (fountain/potion/ability) — raise our record to match
+      const p = rooms.get(ws.room)?.players.get(ws.uid);
+      if (p && !p.dead){ if(m.mh) p.mh = Math.max(1, Math.min(9999, +m.mh)); const v = Math.max(0, Math.min(p.mh, +m.hp||0)); if (v > p.hp) p.hp = v; }
     }
     else if (m.t === 'respawn' && ws.room){            // client told us the player respawned
       const p = rooms.get(ws.room)?.players.get(ws.uid); if (p){ p.hp = p.mh; p.dead=false; if(m.x)p.sx=p.x=+m.x; if(m.y)p.sy=p.y=+m.y; }
