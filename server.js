@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v7-parties';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v8-combat-vis';   // bump on each deploy so clients can confirm what's live
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null;
 try {
@@ -207,7 +207,7 @@ wss.on('connection', (ws)=>{
       if (!pid){ pid = 'p_'+inv.uid; parties.set(pid, { leader: inv.uid, members: new Set([inv.uid]) }); playerParty.set(inv.uid, pid); }
       leaveParty(ws.uid);
       const pt = parties.get(pid); if (!pt) return;
-      if (pt.members.size >= 6){ send(ws,{t:'party_full'}); return; }
+      if (pt.members.size >= 4){ send(ws,{t:'party_full'}); return; }
       pt.members.add(ws.uid); playerParty.set(ws.uid, pid);
       sendParty(pid);
     }
@@ -216,6 +216,17 @@ wss.on('connection', (ws)=>{
       leaveParty(ws.uid);
       if (pid) sendParty(pid);
       send(ws, { t:'party', id:null, members:[], leader:null });
+    }
+    else if (m.t === 'party_chat'){
+      const pid = playerParty.get(ws.uid); if(!pid) return; const pt=parties.get(pid); if(!pt) return;
+      const text=String(m.text||'').slice(0,200); if(!text) return;
+      const msg=JSON.stringify({ t:'party_msg', from:ws.uid, fromN:ws.name||'?', text });
+      for(const uid of pt.members){ if(uid===ws.uid) continue; const w=byUid.get(uid); if(w&&w.readyState===1) w.send(msg); }
+    }
+    else if (m.t === 'dm'){
+      const tw=byUid.get(String(m.to)); if(!tw) return;
+      const text=String(m.text||'').slice(0,200); if(!text) return;
+      send(tw, { t:'dm_msg', from:ws.uid, fromN:ws.name||'?', text });
     }
     else if (m.t === 'duel_hit' && ws.room){          // land a hit in an active duel
       const room = rooms.get(ws.room); if (!room) return;
@@ -271,7 +282,7 @@ setInterval(()=>{
         } else if (mon.acd <= 0){ // attack — authoritative damage to the player
           mon.acd = st.cd;
           near.hp = Math.max(0, near.hp - st.dmg);
-          send(near.ws, { t:'youhit', dmg: st.dmg, hp: near.hp, by: mon.k });
+          send(near.ws, { t:'youhit', dmg: st.dmg, hp: near.hp, by: mon.k, byId: mon.id, mx: Math.round(mon.x), my: Math.round(mon.y) });
           if (near.hp <= 0){ broadcast(key, { t:'pdeath', uid: near.uid, by: mon.k }); near.hp = near.mh; }
         }
       } else { // wander gently toward home
