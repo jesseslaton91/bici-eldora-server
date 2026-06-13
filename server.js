@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v6-softer-mobs';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v7-parties';   // bump on each deploy so clients can confirm what's live
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null;
 try {
@@ -54,6 +54,9 @@ const MOB = {
   wolf:   { hp: 38, spd: 130, dmg: 4,  aggro: 320, atk: 46, cd: 1.0 },
 };
 // which kinds (and how many) spawn in each room type
+const byUid = new Map();
+const parties = new Map();
+const playerParty = new Map();
 const ROOM_SPAWN = {
   'wild':       { kinds: ['gnome','imp','kobold','boggart'], n: 6 },
   'glades':     { kinds: ['kobold','boggart','redcap','wolf'], n: 9 },
@@ -63,6 +66,7 @@ const ROOM_SPAWN = {
   'skyland:2':  { kinds: ['imp','redcap','gremlin','kobold'], n: 6 },
 };
 function spawnCfg(roomKey){
+  roomKey = String(roomKey||'').split('#')[0];
   if (ROOM_SPAWN[roomKey]) return ROOM_SPAWN[roomKey];
   if (roomKey && roomKey.indexOf('dungeon') === 0) return { kinds: ['kobold','redcap','boggart','wolf'], n: 10 };
   return null; // towns / interiors: no monsters
@@ -125,7 +129,9 @@ wss.on('connection', (ws)=>{
       if (ws.room){ const pr = rooms.get(ws.room); if (pr) pr.players.delete(ws.uid); }
       // when auth is on, the uid is the VERIFIED one (clients can't impersonate); otherwise legacy behaviour
       ws.uid = verifiedUid || (String(m.uid||'').slice(0,40) || ('u'+Math.random().toString(16).slice(2,10)));
-      ws.room = String(m.room||'town').slice(0,40);
+      ws.room = String(m.room||'town').slice(0,48);
+      ws.name = String(m.name||'?').slice(0,16);
+      byUid.set(ws.uid, ws);
       const room = getRoom(ws.room);
       if (m.w && m.h && m.tile) room.geo = { w: Math.max(8,Math.min(200,+m.w)), h: Math.max(8,Math.min(200,+m.h)), tile: Math.max(8,Math.min(128,+m.tile)) };
       if (room.players.size >= MAX_PLAYERS_PER_ROOM && !room.players.has(ws.uid)) { send(ws,{t:'full'}); return; }
@@ -191,6 +197,26 @@ wss.on('connection', (ws)=>{
       if (me) me._inreq = null;
       if (opp) send(opp.ws, { t:'duel_declined', by: ws.uid });
     }
+    else if (m.t === 'party_invite'){
+      const tw = byUid.get(String(m.to)); if (!tw) return;
+      send(tw, { t:'party_inv', from: ws.uid, fromN: ws.name||'A hero' });
+    }
+    else if (m.t === 'party_accept'){
+      const inv = byUid.get(String(m.to)); if (!inv) return;
+      let pid = playerParty.get(inv.uid);
+      if (!pid){ pid = 'p_'+inv.uid; parties.set(pid, { leader: inv.uid, members: new Set([inv.uid]) }); playerParty.set(inv.uid, pid); }
+      leaveParty(ws.uid);
+      const pt = parties.get(pid); if (!pt) return;
+      if (pt.members.size >= 6){ send(ws,{t:'party_full'}); return; }
+      pt.members.add(ws.uid); playerParty.set(ws.uid, pid);
+      sendParty(pid);
+    }
+    else if (m.t === 'party_leave'){
+      const pid = playerParty.get(ws.uid);
+      leaveParty(ws.uid);
+      if (pid) sendParty(pid);
+      send(ws, { t:'party', id:null, members:[], leader:null });
+    }
     else if (m.t === 'duel_hit' && ws.room){          // land a hit in an active duel
       const room = rooms.get(ws.room); if (!room) return;
       const me = room.players.get(ws.uid); if (!me || !me.duel) return;
@@ -218,7 +244,7 @@ wss.on('connection', (ws)=>{
       const p = rooms.get(ws.room)?.players.get(ws.uid); if (p){ p.hp = p.mh; p.dead=false; if(m.x)p.sx=p.x=+m.x; if(m.y)p.sy=p.y=+m.y; }
     }
   });
-  ws.on('close', ()=>{ if (ws.room){ const r = rooms.get(ws.room); if (r) r.players.delete(ws.uid); } });
+  ws.on('close', ()=>{ if (ws.room){ const r = rooms.get(ws.room); if (r) r.players.delete(ws.uid); } const pid=playerParty.get(ws.uid); leaveParty(ws.uid); if(pid)sendParty(pid); byUid.delete(ws.uid); });
   ws.on('error', ()=>{});
 });
 
@@ -262,6 +288,25 @@ setInterval(()=>{
   });
 }, 1000/TICK_HZ);
 
+function nameOf(uid){ const w = byUid.get(uid); return w ? (w.name||uid) : uid; }
+function sendParty(pid){
+  const pt = parties.get(pid); if (!pt) return;
+  const members = [...pt.members].map(uid => ({ uid, n: nameOf(uid) }));
+  const msg = JSON.stringify({ t:'party', id: pid, leader: pt.leader, members });
+  for (const uid of pt.members){ const w = byUid.get(uid); if (w && w.readyState===1) w.send(msg); }
+}
+function leaveParty(uid){
+  const pid = playerParty.get(uid); if (!pid) return;
+  const pt = parties.get(pid);
+  playerParty.delete(uid);
+  if (pt){
+    pt.members.delete(uid);
+    if (pt.members.size <= 1){
+      for (const m of pt.members){ playerParty.delete(m); const w = byUid.get(m); if (w && w.readyState===1) w.send(JSON.stringify({ t:'party', id:null, members:[], leader:null })); }
+      parties.delete(pid);
+    } else { if (pt.leader === uid) pt.leader = [...pt.members][0]; sendParty(pid); }
+  }
+}
 function endDuel(room, a, b, winnerUid){
   if (a) a.duel = null; if (b) b.duel = null;
   if (a) send(a.ws, { t:'duel_end', winner: winnerUid });
