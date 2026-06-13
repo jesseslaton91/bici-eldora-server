@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v8-combat-vis';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION='v9-gate';   // bump on each deploy so clients can confirm what's live
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null;
 try {
@@ -60,7 +60,8 @@ const playerParty = new Map();
 const ROOM_SPAWN = {
   'wild':       { kinds: ['gnome','imp','kobold','boggart'], n: 6 },
   'glades':     { kinds: ['kobold','boggart','redcap','wolf'], n: 9 },
-  'westgate':   { kinds: ['gnome','imp','wolf'], n: 5 },
+  // 'westgate' removed: the gate is driven by the client-side Warden waves, so the server no longer
+  // spawns its own (invisible-to-the-player) monsters there.
   'siege':      { kinds: ['redcap','boggart','gremlin'], n: 8 },
   'skyland:1':  { kinds: ['gnome','boggart','sprite','wisp'], n: 6 },
   'skyland:2':  { kinds: ['imp','redcap','gremlin','kobold'], n: 6 },
