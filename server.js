@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v5-keepalive-arena';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v6-softer-mobs';   // bump on each deploy so clients can confirm what's live
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null;
 try {
@@ -42,16 +42,16 @@ function maxHitFor(lvl){ return 14 + Math.max(0, Math.min(60, (+lvl||1))) * 5; }
 
 // ── monster stat table (by kind) — tune freely ──
 const MOB = {
-  gnome:  { hp: 26, spd: 70,  dmg: 5,  aggro: 240, atk: 44, cd: 1.3 },
-  imp:    { hp: 30, spd: 95,  dmg: 6,  aggro: 280, atk: 46, cd: 1.1 },
-  kobold: { hp: 34, spd: 80,  dmg: 7,  aggro: 250, atk: 48, cd: 1.2 },
-  boggart:{ hp: 40, spd: 64,  dmg: 8,  aggro: 230, atk: 50, cd: 1.4 },
-  redcap: { hp: 44, spd: 90,  dmg: 9,  aggro: 280, atk: 48, cd: 1.2 },
-  gremlin:{ hp: 30, spd: 110, dmg: 6,  aggro: 300, atk: 44, cd: 1.0 },
-  sprite: { hp: 22, spd: 120, dmg: 4,  aggro: 300, atk: 42, cd: 0.9 },
-  wisp:   { hp: 24, spd: 105, dmg: 5,  aggro: 300, atk: 42, cd: 1.0 },
-  slime:  { hp: 36, spd: 50,  dmg: 5,  aggro: 200, atk: 46, cd: 1.4 },
-  wolf:   { hp: 38, spd: 130, dmg: 7,  aggro: 320, atk: 46, cd: 1.0 },
+  gnome:  { hp: 26, spd: 70,  dmg: 2,  aggro: 240, atk: 44, cd: 1.3 },
+  imp:    { hp: 30, spd: 95,  dmg: 3,  aggro: 280, atk: 46, cd: 1.1 },
+  kobold: { hp: 34, spd: 80,  dmg: 4,  aggro: 250, atk: 48, cd: 1.2 },
+  boggart:{ hp: 40, spd: 64,  dmg: 4,  aggro: 230, atk: 50, cd: 1.4 },
+  redcap: { hp: 44, spd: 90,  dmg: 4,  aggro: 280, atk: 48, cd: 1.2 },
+  gremlin:{ hp: 30, spd: 110, dmg: 3,  aggro: 300, atk: 44, cd: 1.0 },
+  sprite: { hp: 22, spd: 120, dmg: 2,  aggro: 300, atk: 42, cd: 0.9 },
+  wisp:   { hp: 24, spd: 105, dmg: 2,  aggro: 300, atk: 42, cd: 1.0 },
+  slime:  { hp: 36, spd: 50,  dmg: 2,  aggro: 200, atk: 46, cd: 1.4 },
+  wolf:   { hp: 38, spd: 130, dmg: 4,  aggro: 320, atk: 46, cd: 1.0 },
 };
 // which kinds (and how many) spawn in each room type
 const ROOM_SPAWN = {
