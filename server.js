@@ -15,6 +15,13 @@ const PORT = process.env.PORT || 8787;
 const TICK_HZ = 20;                 // server simulation rate
 const NET_HZ = 15;                  // state broadcast rate
 const PLAYER_TIMEOUT = 15000;       // drop silent players
+// ── anti-cheat / abuse limits (tunable) ──
+const DMG_CAP   = 150;   // max damage accepted per hit (stops 9999 one-shots)
+const HIT_COOL  = 130;   // ms between accepted hits from one player (stops machine-gun hits)
+const HIT_RANGE = 220;   // player must be within this many px of the monster to damage it
+const MSG_PER_S = 60;    // max messages/sec per connection before we ignore the flood
+const MAX_MSG_BYTES = 4000;
+const MAX_PLAYERS_PER_ROOM = 60;
 
 // ── monster stat table (by kind) — tune freely ──
 const MOB = {
@@ -85,6 +92,10 @@ function send(ws, obj){ if (ws.readyState===1) ws.send(JSON.stringify(obj)); }
 wss.on('connection', (ws)=>{
   ws.alive = true; ws.uid = null; ws.room = null;
   ws.on('message', (buf)=>{
+    if (buf.length > MAX_MSG_BYTES) return;                       // ignore oversized payloads
+    const _t = Date.now();
+    if (_t - (ws._win||0) > 1000){ ws._win = _t; ws._cnt = 0; }
+    if (++ws._cnt > MSG_PER_S) return;                            // flood: silently drop
     let m; try { m = JSON.parse(buf); } catch(e){ return; }
     if (m.t === 'join'){
       // leave previous room
@@ -92,7 +103,8 @@ wss.on('connection', (ws)=>{
       ws.uid = String(m.uid||'').slice(0,40) || ('u'+Math.random().toString(16).slice(2,10));
       ws.room = String(m.room||'town').slice(0,40);
       const room = getRoom(ws.room);
-      if (m.w && m.h && m.tile) room.geo = { w:+m.w, h:+m.h, tile:+m.tile };
+      if (m.w && m.h && m.tile) room.geo = { w: Math.max(8,Math.min(200,+m.w)), h: Math.max(8,Math.min(200,+m.h)), tile: Math.max(8,Math.min(128,+m.tile)) };
+      if (room.players.size >= MAX_PLAYERS_PER_ROOM && !room.players.has(ws.uid)) { send(ws,{t:'full'}); return; }
       ensureMonsters(room, ws.room);
       room.players.set(ws.uid, {
         ws, uid: ws.uid, n: String(m.name||'?').slice(0,16),
@@ -103,26 +115,37 @@ wss.on('connection', (ws)=>{
       send(ws, { t:'joined', room: ws.room });
     }
     else if (m.t === 'pos' && ws.room){
-      const p = rooms.get(ws.room)?.players.get(ws.uid); if (!p) return;
-      p.x=+m.x||p.x; p.y=+m.y||p.y; p.dir=m.dir||p.dir; p.mv=m.mv?1:0; p.fl=m.fl?1:0;
+      const room = rooms.get(ws.room); const p = room?.players.get(ws.uid); if (!p) return;
+      let nx=+m.x, ny=+m.y;
+      if (isFinite(nx) && room.geo) p.x = Math.max(0, Math.min(room.geo.w*room.geo.tile, nx));
+      if (isFinite(ny) && room.geo) p.y = Math.max(0, Math.min(room.geo.h*room.geo.tile, ny));
+      p.dir=String(m.dir||p.dir).slice(0,6); p.mv=m.mv?1:0; p.fl=m.fl?1:0;
       if (m.act) p.act = m.act+'|'+Date.now();
       if (m.pet!=null) p.pet=m.pet;
       if (m.maxhp) p.mh=+m.maxhp;
       p.last = Date.now();
     }
-    else if (m.t === 'hit' && ws.room){               // player damaged a monster
+    else if (m.t === 'hit' && ws.room){               // player claims to have damaged a monster
       const room = rooms.get(ws.room); if (!room) return;
+      const p = room.players.get(ws.uid); if (!p) return;
+      const t2 = Date.now();
+      if (t2 - (p._lastHit||0) < HIT_COOL) return;     // too fast → reject
+      p._lastHit = t2;
       const mon = room.mons.find(o=>o.id===m.mid && !o.dead); if (!mon) return;
-      mon.hp -= Math.max(0, Math.min(999, +m.dmg||0));
+      if (Math.hypot(p.x-mon.x, p.y-mon.y) > HIT_RANGE) return;   // not actually near it → reject
+      mon.hp -= Math.max(0, Math.min(DMG_CAP, +m.dmg||0));        // damage is capped server-side
       if (mon.hp <= 0){
         mon.dead = true; mon.hp = 0; mon.respawn = Date.now() + 9000; // respawn after 9s
         broadcast(ws.room, { t:'kill', mid: mon.id, by: ws.uid });
       }
     }
-    else if (m.t === 'pvp' && ws.room){               // player damaged another player (duel)
+    else if (m.t === 'pvp' && ws.room){               // player claims to have damaged another player (duel)
       const room = rooms.get(ws.room); if (!room) return;
+      const p = room.players.get(ws.uid); if (!p) return;
+      const t3 = Date.now(); if (t3 - (p._lastPvp||0) < HIT_COOL) return; p._lastPvp = t3;
       const tgt = room.players.get(String(m.to)); if (!tgt) return;
-      tgt.hp = Math.max(0, tgt.hp - Math.max(0, Math.min(999, +m.dmg||0)));
+      if (Math.hypot(p.x-tgt.x, p.y-tgt.y) > HIT_RANGE) return;
+      tgt.hp = Math.max(0, tgt.hp - Math.max(0, Math.min(DMG_CAP, +m.dmg||0)));
       if (tgt.hp <= 0){ broadcast(ws.room, { t:'pdeath', uid: tgt.uid, by: ws.uid }); tgt.hp = tgt.mh; }
     }
     else if (m.t === 'respawn' && ws.room){            // client told us the player respawned
