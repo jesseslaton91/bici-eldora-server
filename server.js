@@ -12,6 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
+const SERVER_VERSION = 'v4-duels-anticheat-sync';   // bump on each deploy so clients can confirm what's live
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null;
 try {
@@ -137,7 +138,7 @@ wss.on('connection', (ws)=>{
         duel: null,
         sx:+m.x||0, sy:+m.y||0, last: Date.now(), dead:false
       });
-      send(ws, { t:'joined', room: ws.room });
+      send(ws, { t:'joined', room: ws.room, ver: SERVER_VERSION });
     }
     else if (m.t === 'pos' && ws.room){
       const room = rooms.get(ws.room); const p = room?.players.get(ws.uid); if (!p) return;
@@ -287,4 +288,4 @@ setInterval(()=>{
   });
 }, 1000/NET_HZ);
 
-server.listen(PORT, ()=>console.log('BICI authoritative server listening on :'+PORT));
+server.listen(PORT, ()=>console.log('BICI authoritative server '+SERVER_VERSION+' listening on :'+PORT));
