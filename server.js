@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v4-duels-anticheat-sync';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v5-keepalive-arena';   // bump on each deploy so clients can confirm what's live
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null;
 try {
@@ -27,7 +27,7 @@ try {
 } catch (e) { console.error('[auth] admin init failed (running open):', e.message); }
 const TICK_HZ = 20;                 // server simulation rate
 const NET_HZ = 15;                  // state broadcast rate
-const PLAYER_TIMEOUT = 15000;       // drop silent players
+const PLAYER_TIMEOUT = 600000;      // keep players while their socket is open (ws close handles real disconnects) — no vanishing
 // ── anti-cheat / abuse limits (tunable) ──
 const DMG_CAP   = 150;   // max damage accepted per hit (stops 9999 one-shots)
 const HIT_COOL  = 130;   // ms between accepted hits from one player (stops machine-gun hits)
@@ -183,6 +183,7 @@ wss.on('connection', (ws)=>{
       opp.duel = { opp: me.uid,  myhp: DUEL_HP, ophp: DUEL_HP, endT: me.duel.endT };
       send(me.ws,  { t:'duel_start', opp: opp.uid, oppN: opp.n, hp: DUEL_HP });
       send(opp.ws, { t:'duel_start', opp: me.uid,  oppN: me.n,  hp: DUEL_HP });
+      broadcast(ws.room, { t:'duel_event', k:'start', a: me.n, b: opp.n });   // referee + crowd react for everyone
     }
     else if (m.t === 'duel_dec' && ws.room){          // decline
       const room = rooms.get(ws.room); if (!room) return;
@@ -265,6 +266,9 @@ function endDuel(room, a, b, winnerUid){
   if (a) a.duel = null; if (b) b.duel = null;
   if (a) send(a.ws, { t:'duel_end', winner: winnerUid });
   if (b) send(b.ws, { t:'duel_end', winner: winnerUid });
+  const wn = winnerUid==='draw' ? 'draw' : (a && winnerUid===a.uid ? a.n : (b? b.n : 'a champion'));
+  if (room){ const s = JSON.stringify({ t:'duel_event', k:'end', winner: wn, a: a&&a.n, b: b&&b.n });
+    for (const p of room.players.values()) if (p.ws.readyState===1) p.ws.send(s); }
 }
 function broadcast(key, obj){
   const room = rooms.get(key); if (!room) return;
