@@ -1,0 +1,193 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   BICI / ELDORA — AUTHORITATIVE GAME SERVER  (v1)
+   Real-time monster + player + combat sync over WebSockets.
+   The SERVER owns monster positions, HP and deaths, so every player in a
+   room sees exactly the same thing. Clients send their position + "I hit
+   monster X for N"; the server resolves it and broadcasts the truth.
+
+   Run:  npm install   then   node server.js
+   Port: process.env.PORT || 8787
+   ═══════════════════════════════════════════════════════════════════════ */
+const http = require('http');
+const { WebSocketServer } = require('ws');
+
+const PORT = process.env.PORT || 8787;
+const TICK_HZ = 20;                 // server simulation rate
+const NET_HZ = 15;                  // state broadcast rate
+const PLAYER_TIMEOUT = 15000;       // drop silent players
+
+// ── monster stat table (by kind) — tune freely ──
+const MOB = {
+  gnome:  { hp: 26, spd: 70,  dmg: 5,  aggro: 240, atk: 44, cd: 1.3 },
+  imp:    { hp: 30, spd: 95,  dmg: 6,  aggro: 280, atk: 46, cd: 1.1 },
+  kobold: { hp: 34, spd: 80,  dmg: 7,  aggro: 250, atk: 48, cd: 1.2 },
+  boggart:{ hp: 40, spd: 64,  dmg: 8,  aggro: 230, atk: 50, cd: 1.4 },
+  redcap: { hp: 44, spd: 90,  dmg: 9,  aggro: 280, atk: 48, cd: 1.2 },
+  gremlin:{ hp: 30, spd: 110, dmg: 6,  aggro: 300, atk: 44, cd: 1.0 },
+  sprite: { hp: 22, spd: 120, dmg: 4,  aggro: 300, atk: 42, cd: 0.9 },
+  wisp:   { hp: 24, spd: 105, dmg: 5,  aggro: 300, atk: 42, cd: 1.0 },
+  slime:  { hp: 36, spd: 50,  dmg: 5,  aggro: 200, atk: 46, cd: 1.4 },
+  wolf:   { hp: 38, spd: 130, dmg: 7,  aggro: 320, atk: 46, cd: 1.0 },
+};
+// which kinds (and how many) spawn in each room type
+const ROOM_SPAWN = {
+  'wild':       { kinds: ['gnome','imp','kobold','boggart'], n: 6 },
+  'glades':     { kinds: ['kobold','boggart','redcap','wolf'], n: 9 },
+  'westgate':   { kinds: ['gnome','imp','wolf'], n: 5 },
+  'siege':      { kinds: ['redcap','boggart','gremlin'], n: 8 },
+  'skyland:1':  { kinds: ['gnome','boggart','sprite','wisp'], n: 6 },
+  'skyland:2':  { kinds: ['imp','redcap','gremlin','kobold'], n: 6 },
+};
+function spawnCfg(roomKey){
+  if (ROOM_SPAWN[roomKey]) return ROOM_SPAWN[roomKey];
+  if (roomKey && roomKey.indexOf('dungeon') === 0) return { kinds: ['kobold','redcap','boggart','wolf'], n: 10 };
+  return null; // towns / interiors: no monsters
+}
+
+const rooms = new Map(); // roomKey -> { players:Map, mons:[], geo:{w,h,tile}, seq }
+function getRoom(key){
+  if (!rooms.has(key)) rooms.set(key, { players: new Map(), mons: [], geo: null, seq: 1 });
+  return rooms.get(key);
+}
+function rnd(a,b){ return a + Math.random()*(b-a); }
+
+function ensureMonsters(room, key){
+  const cfg = spawnCfg(key);
+  if (!cfg || !room.geo) { room.mons = []; return; }
+  if (room.mons.length) return; // already spawned
+  const { w, h, tile } = room.geo;
+  for (let i=0;i<cfg.n;i++){
+    const kind = cfg.kinds[(Math.random()*cfg.kinds.length)|0];
+    const st = MOB[kind] || MOB.gnome;
+    room.mons.push({
+      id: room.seq++, k: kind,
+      x: rnd(3, w-3)*tile, y: rnd(3, h-3)*tile,
+      hp: st.hp, mh: st.hp, dead: false, respawn: 0,
+      acd: 0, tgt: null,
+      hx: rnd(3, w-3)*tile, hy: rnd(3, h-3)*tile // wander home
+    });
+  }
+}
+
+const wss = new WebSocketServer({ noServer: true });
+const server = http.createServer((req,res)=>{
+  // a tiny health page so you can confirm the server is up in a browser
+  res.writeHead(200, {'content-type':'text/plain'});
+  let n=0; rooms.forEach(r=>n+=r.players.size);
+  res.end('BICI authoritative server OK — '+rooms.size+' rooms, '+n+' players online');
+});
+server.on('upgrade', (req, socket, head)=>{
+  wss.handleUpgrade(req, socket, head, ws=>wss.emit('connection', ws, req));
+});
+
+function send(ws, obj){ if (ws.readyState===1) ws.send(JSON.stringify(obj)); }
+
+wss.on('connection', (ws)=>{
+  ws.alive = true; ws.uid = null; ws.room = null;
+  ws.on('message', (buf)=>{
+    let m; try { m = JSON.parse(buf); } catch(e){ return; }
+    if (m.t === 'join'){
+      // leave previous room
+      if (ws.room){ const pr = rooms.get(ws.room); if (pr) pr.players.delete(ws.uid); }
+      ws.uid = String(m.uid||'').slice(0,40) || ('u'+Math.random().toString(16).slice(2,10));
+      ws.room = String(m.room||'town').slice(0,40);
+      const room = getRoom(ws.room);
+      if (m.w && m.h && m.tile) room.geo = { w:+m.w, h:+m.h, tile:+m.tile };
+      ensureMonsters(room, ws.room);
+      room.players.set(ws.uid, {
+        ws, uid: ws.uid, n: String(m.name||'?').slice(0,16),
+        x:+m.x||0, y:+m.y||0, dir:'down', mv:0, fl:0, act:'',
+        hp:+m.hp||30, mh:+m.maxhp||30, av:m.av||{}, pet:m.pet||'',
+        sx:+m.x||0, sy:+m.y||0, last: Date.now(), dead:false
+      });
+      send(ws, { t:'joined', room: ws.room });
+    }
+    else if (m.t === 'pos' && ws.room){
+      const p = rooms.get(ws.room)?.players.get(ws.uid); if (!p) return;
+      p.x=+m.x||p.x; p.y=+m.y||p.y; p.dir=m.dir||p.dir; p.mv=m.mv?1:0; p.fl=m.fl?1:0;
+      if (m.act) p.act = m.act+'|'+Date.now();
+      if (m.pet!=null) p.pet=m.pet;
+      if (m.maxhp) p.mh=+m.maxhp;
+      p.last = Date.now();
+    }
+    else if (m.t === 'hit' && ws.room){               // player damaged a monster
+      const room = rooms.get(ws.room); if (!room) return;
+      const mon = room.mons.find(o=>o.id===m.mid && !o.dead); if (!mon) return;
+      mon.hp -= Math.max(0, Math.min(999, +m.dmg||0));
+      if (mon.hp <= 0){
+        mon.dead = true; mon.hp = 0; mon.respawn = Date.now() + 9000; // respawn after 9s
+        broadcast(ws.room, { t:'kill', mid: mon.id, by: ws.uid });
+      }
+    }
+    else if (m.t === 'pvp' && ws.room){               // player damaged another player (duel)
+      const room = rooms.get(ws.room); if (!room) return;
+      const tgt = room.players.get(String(m.to)); if (!tgt) return;
+      tgt.hp = Math.max(0, tgt.hp - Math.max(0, Math.min(999, +m.dmg||0)));
+      if (tgt.hp <= 0){ broadcast(ws.room, { t:'pdeath', uid: tgt.uid, by: ws.uid }); tgt.hp = tgt.mh; }
+    }
+    else if (m.t === 'respawn' && ws.room){            // client told us the player respawned
+      const p = rooms.get(ws.room)?.players.get(ws.uid); if (p){ p.hp = p.mh; p.dead=false; if(m.x)p.sx=p.x=+m.x; if(m.y)p.sy=p.y=+m.y; }
+    }
+  });
+  ws.on('close', ()=>{ if (ws.room){ const r = rooms.get(ws.room); if (r) r.players.delete(ws.uid); } });
+  ws.on('error', ()=>{});
+});
+
+// ── simulation ──
+let last = Date.now();
+setInterval(()=>{
+  const now = Date.now(); const dt = Math.min(0.1, (now-last)/1000); last = now;
+  rooms.forEach((room, key)=>{
+    // drop silent players
+    for (const [uid,p] of room.players){ if (now - p.last > PLAYER_TIMEOUT) room.players.delete(uid); }
+    if (room.players.size === 0){ room.mons = []; return; } // sleep empty rooms (monsters re-spawn on next join)
+    const players = [...room.players.values()];
+    for (const mon of room.mons){
+      if (mon.dead){ if (now >= mon.respawn){ const st = MOB[mon.k]||MOB.gnome; mon.dead=false; mon.hp=mon.mh=st.hp; mon.x=mon.hx; mon.y=mon.hy; } continue; }
+      const st = MOB[mon.k] || MOB.gnome;
+      // nearest player
+      let near=null, nd=1e9;
+      for (const p of players){ if (p.dead) continue; const d=Math.hypot(p.x-mon.x,p.y-mon.y); if (d<nd){ nd=d; near=p; } }
+      mon.acd = Math.max(0, mon.acd - dt);
+      if (near && nd < st.aggro){
+        if (nd > st.atk){ // chase
+          mon.x += (near.x-mon.x)/nd * st.spd * dt;
+          mon.y += (near.y-mon.y)/nd * st.spd * dt;
+        } else if (mon.acd <= 0){ // attack — authoritative damage to the player
+          mon.acd = st.cd;
+          near.hp = Math.max(0, near.hp - st.dmg);
+          send(near.ws, { t:'youhit', dmg: st.dmg, hp: near.hp, by: mon.k });
+          if (near.hp <= 0){ broadcast(key, { t:'pdeath', uid: near.uid, by: mon.k }); near.hp = near.mh; }
+        }
+      } else { // wander gently toward home
+        const d=Math.hypot(mon.hx-mon.x,mon.hy-mon.y);
+        if (d>8){ mon.x += (mon.hx-mon.x)/d * st.spd*0.4 * dt; mon.y += (mon.hy-mon.y)/d * st.spd*0.4 * dt; }
+        else { mon.hx = mon.x + rnd(-120,120); mon.hy = mon.y + rnd(-120,120); }
+      }
+    }
+  });
+}, 1000/TICK_HZ);
+
+function broadcast(key, obj){
+  const room = rooms.get(key); if (!room) return;
+  const s = JSON.stringify(obj);
+  for (const p of room.players.values()) if (p.ws.readyState===1) p.ws.send(s);
+}
+
+// ── state broadcast ──
+setInterval(()=>{
+  rooms.forEach((room, key)=>{
+    if (room.players.size === 0) return;
+    const mons = room.mons.map(o=>({ id:o.id, k:o.k, x:Math.round(o.x), y:Math.round(o.y), hp:o.hp, mh:o.mh, dead:o.dead?1:0 }));
+    for (const p of room.players.values()){
+      const plrs = [];
+      for (const q of room.players.values()){
+        if (q.uid === p.uid) continue;
+        plrs.push({ uid:q.uid, n:q.n, x:Math.round(q.x), y:Math.round(q.y), dir:q.dir, mv:q.mv, fl:q.fl, act:q.act, hp:q.hp, mh:q.mh, av:q.av, pet:q.pet });
+      }
+      send(p.ws, { t:'state', mons, plrs, hp:p.hp, mh:p.mh });
+    }
+  });
+}, 1000/NET_HZ);
+
+server.listen(PORT, ()=>console.log('BICI authoritative server listening on :'+PORT));
