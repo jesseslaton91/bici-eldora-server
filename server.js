@@ -12,6 +12,18 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
+// ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
+let adminAuth = null;
+try {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    const admin = require('firebase-admin');
+    admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
+    adminAuth = admin.auth();
+    console.log('[auth] Firebase token verification ENABLED — clients must present a valid ID token.');
+  } else {
+    console.log('[auth] FIREBASE_SERVICE_ACCOUNT not set — running WITHOUT token verification (open mode).');
+  }
+} catch (e) { console.error('[auth] admin init failed (running open):', e.message); }
 const TICK_HZ = 20;                 // server simulation rate
 const NET_HZ = 15;                  // state broadcast rate
 const PLAYER_TIMEOUT = 15000;       // drop silent players
@@ -22,6 +34,10 @@ const HIT_RANGE = 220;   // player must be within this many px of the monster to
 const MSG_PER_S = 60;    // max messages/sec per connection before we ignore the flood
 const MAX_MSG_BYTES = 4000;
 const MAX_PLAYERS_PER_ROOM = 60;
+const DUEL_HP = 100;       // fixed, fair HP for friendly duels (server-owned)
+const DUEL_LEN = 60000;    // 60s → draw
+// server-owned per-level damage ceiling: a player can never hit harder than their level allows
+function maxHitFor(lvl){ return 14 + Math.max(0, Math.min(60, (+lvl||1))) * 5; } // L1≈19, L20≈114, hard cap ~314
 
 // ── monster stat table (by kind) — tune freely ──
 const MOB = {
@@ -91,16 +107,23 @@ function send(ws, obj){ if (ws.readyState===1) ws.send(JSON.stringify(obj)); }
 
 wss.on('connection', (ws)=>{
   ws.alive = true; ws.uid = null; ws.room = null;
-  ws.on('message', (buf)=>{
+  ws.on('message', async (buf)=>{
     if (buf.length > MAX_MSG_BYTES) return;                       // ignore oversized payloads
     const _t = Date.now();
     if (_t - (ws._win||0) > 1000){ ws._win = _t; ws._cnt = 0; }
     if (++ws._cnt > MSG_PER_S) return;                            // flood: silently drop
     let m; try { m = JSON.parse(buf); } catch(e){ return; }
     if (m.t === 'join'){
+      // verify identity when token-checking is enabled
+      let verifiedUid = null;
+      if (adminAuth){
+        try { const dec = await adminAuth.verifyIdToken(String(m.token||'')); verifiedUid = dec.uid; }
+        catch(e){ send(ws, { t:'authfail' }); return; }   // bad/absent token → refuse to join
+      }
       // leave previous room
       if (ws.room){ const pr = rooms.get(ws.room); if (pr) pr.players.delete(ws.uid); }
-      ws.uid = String(m.uid||'').slice(0,40) || ('u'+Math.random().toString(16).slice(2,10));
+      // when auth is on, the uid is the VERIFIED one (clients can't impersonate); otherwise legacy behaviour
+      ws.uid = verifiedUid || (String(m.uid||'').slice(0,40) || ('u'+Math.random().toString(16).slice(2,10)));
       ws.room = String(m.room||'town').slice(0,40);
       const room = getRoom(ws.room);
       if (m.w && m.h && m.tile) room.geo = { w: Math.max(8,Math.min(200,+m.w)), h: Math.max(8,Math.min(200,+m.h)), tile: Math.max(8,Math.min(128,+m.tile)) };
@@ -110,6 +133,8 @@ wss.on('connection', (ws)=>{
         ws, uid: ws.uid, n: String(m.name||'?').slice(0,16),
         x:+m.x||0, y:+m.y||0, dir:'down', mv:0, fl:0, act:'',
         hp:+m.hp||30, mh:+m.maxhp||30, av:m.av||{}, pet:m.pet||'',
+        lvl: Math.max(1, Math.min(60, +m.lvl||1)), maxhit: maxHitFor(m.lvl),
+        duel: null,
         sx:+m.x||0, sy:+m.y||0, last: Date.now(), dead:false
       });
       send(ws, { t:'joined', room: ws.room });
@@ -123,6 +148,7 @@ wss.on('connection', (ws)=>{
       if (m.act) p.act = m.act+'|'+Date.now();
       if (m.pet!=null) p.pet=m.pet;
       if (m.maxhp) p.mh=+m.maxhp;
+      if (m.lvl){ p.lvl=Math.max(1,Math.min(60,+m.lvl)); p.maxhit=maxHitFor(p.lvl); }
       p.last = Date.now();
     }
     else if (m.t === 'hit' && ws.room){               // player claims to have damaged a monster
@@ -133,13 +159,51 @@ wss.on('connection', (ws)=>{
       p._lastHit = t2;
       const mon = room.mons.find(o=>o.id===m.mid && !o.dead); if (!mon) return;
       if (Math.hypot(p.x-mon.x, p.y-mon.y) > HIT_RANGE) return;   // not actually near it → reject
-      mon.hp -= Math.max(0, Math.min(DMG_CAP, +m.dmg||0));        // damage is capped server-side
+      mon.hp -= Math.max(0, Math.min(p.maxhit||DMG_CAP, +m.dmg||0)); // capped to what THIS player's level allows
       if (mon.hp <= 0){
         mon.dead = true; mon.hp = 0; mon.respawn = Date.now() + 9000; // respawn after 9s
         broadcast(ws.room, { t:'kill', mid: mon.id, by: ws.uid });
       }
     }
-    else if (m.t === 'pvp' && ws.room){               // player claims to have damaged another player (duel)
+    else if (m.t === 'duel_req' && ws.room){          // challenge another player
+      const room = rooms.get(ws.room); if (!room) return;
+      const me = room.players.get(ws.uid), tgt = room.players.get(String(m.to));
+      if (!me || !tgt || me.duel || tgt.duel) return;
+      tgt._inreq = { from: ws.uid, t: Date.now() };
+      send(tgt.ws, { t:'duel_incoming', from: ws.uid, fromN: me.n });
+    }
+    else if (m.t === 'duel_acc' && ws.room){          // accept a challenge from m.to
+      const room = rooms.get(ws.room); if (!room) return;
+      const me = room.players.get(ws.uid), opp = room.players.get(String(m.to));
+      if (!me || !opp || me.duel || opp.duel) return;
+      if (!me._inreq || me._inreq.from !== opp.uid || Date.now()-me._inreq.t > 30000) return; // must have a live challenge
+      me._inreq = null;
+      me.duel  = { opp: opp.uid, myhp: DUEL_HP, ophp: DUEL_HP, endT: Date.now()+DUEL_LEN };
+      opp.duel = { opp: me.uid,  myhp: DUEL_HP, ophp: DUEL_HP, endT: me.duel.endT };
+      send(me.ws,  { t:'duel_start', opp: opp.uid, oppN: opp.n, hp: DUEL_HP });
+      send(opp.ws, { t:'duel_start', opp: me.uid,  oppN: me.n,  hp: DUEL_HP });
+    }
+    else if (m.t === 'duel_dec' && ws.room){          // decline
+      const room = rooms.get(ws.room); if (!room) return;
+      const opp = room.players.get(String(m.to)); const me = room.players.get(ws.uid);
+      if (me) me._inreq = null;
+      if (opp) send(opp.ws, { t:'duel_declined', by: ws.uid });
+    }
+    else if (m.t === 'duel_hit' && ws.room){          // land a hit in an active duel
+      const room = rooms.get(ws.room); if (!room) return;
+      const me = room.players.get(ws.uid); if (!me || !me.duel) return;
+      const opp = room.players.get(me.duel.opp); if (!opp || !opp.duel || opp.duel.opp !== me.uid) return;
+      const t4 = Date.now(); if (t4 - (me._lastDuelHit||0) < HIT_COOL) return; me._lastDuelHit = t4;
+      if (Math.hypot(me.x-opp.x, me.y-opp.y) > HIT_RANGE) return;        // must be near your opponent
+      const dmg = Math.max(0, Math.min(me.maxhit||DMG_CAP, +m.dmg||0));  // capped to level
+      opp.duel.myhp = Math.max(0, opp.duel.myhp - dmg);
+      me.duel.ophp  = opp.duel.myhp;
+      // broadcast fresh HP to both
+      send(me.ws,  { t:'duel_state', myhp: me.duel.myhp,  ophp: me.duel.ophp });
+      send(opp.ws, { t:'duel_state', myhp: opp.duel.myhp, ophp: opp.duel.ophp });
+      if (opp.duel.myhp <= 0) endDuel(room, me, opp, me.uid);
+    }
+    else if (m.t === 'pvp' && ws.room){               // (legacy) raw player damage
       const room = rooms.get(ws.room); if (!room) return;
       const p = room.players.get(ws.uid); if (!p) return;
       const t3 = Date.now(); if (t3 - (p._lastPvp||0) < HIT_COOL) return; p._lastPvp = t3;
@@ -188,9 +252,19 @@ setInterval(()=>{
         else { mon.hx = mon.x + rnd(-120,120); mon.hy = mon.y + rnd(-120,120); }
       }
     }
+    // duel draw timer
+    const ended = new Set();
+    for (const p of players){ if (p.duel && Date.now() > p.duel.endT && !ended.has(p.uid)){
+      const opp = room.players.get(p.duel.opp); ended.add(p.uid); if (opp) ended.add(opp.uid);
+      endDuel(room, p, opp, 'draw'); } }
   });
 }, 1000/TICK_HZ);
 
+function endDuel(room, a, b, winnerUid){
+  if (a) a.duel = null; if (b) b.duel = null;
+  if (a) send(a.ws, { t:'duel_end', winner: winnerUid });
+  if (b) send(b.ws, { t:'duel_end', winner: winnerUid });
+}
 function broadcast(key, obj){
   const room = rooms.get(key); if (!room) return;
   const s = JSON.stringify(obj);
