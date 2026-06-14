@@ -40,7 +40,7 @@ const SCORE_GAMES = {
       t=Math.round((Number(b.t)||0)*10)/10, points=clampI(b.points,0,9999999), coins=clampI(b.coins,0,9999999);
       const score=lvl*1000+Math.min(999,m)+done*5000;
       return [
-        { path:'skyhof', val:{lvl,m,t:Math.max(0,Math.min(9e6,t)),points,coins,done}, better:(n,o)=>!o||n.lvl>(o.lvl||0)||(n.lvl===(o.lvl||0)&&n.m>(o.m||0)) },
+        { path:'skyhof', val:{lvl,m,t:Math.max(0,Math.min(9e6,t)),points,coins,deaths:clampI(b.deaths,0,99999),done}, better:(n,o)=>!o||n.lvl>(o.lvl||0)||(n.lvl===(o.lvl||0)&&n.m>(o.m||0)) },
         { path:'scores/skyhop', val:{score,lvl,m,done}, better:(n,o)=>!o||n.score>(o.score||0) },
       ]; },
   crossing: (b)=>{ const stage=clampI(b.stage,0,999), time=clampI(b.time,0,9000000), deaths=clampI(b.deaths,0,99999), done=b.done?1:0;
