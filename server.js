@@ -12,7 +12,8 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION='v11-scores';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION='v12-creator';   // bump on each deploy so clients can confirm what's live
+const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
 const DB_URL = process.env.FIREBASE_DB_URL || 'https://eldora-world-default-rtdb.firebaseio.com';
@@ -206,7 +207,7 @@ wss.on('connection', (ws)=>{
         duel: null,
         sx:+m.x||0, sy:+m.y||0, last: Date.now(), dead:false
       });
-      send(ws, { t:'joined', room: ws.room, ver: SERVER_VERSION });
+      send(ws, { t:'joined', room: ws.room, ver: SERVER_VERSION, proto: PROTOCOL });
     }
     else if (m.t === 'pos' && ws.room){
       const room = rooms.get(ws.room); const p = room?.players.get(ws.uid); if (!p) return;
