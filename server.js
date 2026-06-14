@@ -12,19 +12,65 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION='v10-gates';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION='v11-scores';   // bump on each deploy so clients can confirm what's live
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
-let adminAuth = null;
+let adminAuth = null, adminDb = null;
+const DB_URL = process.env.FIREBASE_DB_URL || 'https://eldora-world-default-rtdb.firebaseio.com';
 try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     const admin = require('firebase-admin');
-    admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
+    admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)), databaseURL: DB_URL });
     adminAuth = admin.auth();
-    console.log('[auth] Firebase token verification ENABLED — clients must present a valid ID token.');
+    adminDb = admin.database();          // the server now owns all leaderboard writes
+    console.log('[auth] Firebase ENABLED — token verification + authoritative score writes.');
   } else {
-    console.log('[auth] FIREBASE_SERVICE_ACCOUNT not set — running WITHOUT token verification (open mode).');
+    console.log('[auth] FIREBASE_SERVICE_ACCOUNT not set — running WITHOUT token verification, and SCORES CANNOT BE SAVED. Set the env var to enable the authoritative leaderboard.');
   }
 } catch (e) { console.error('[auth] admin init failed (running open):', e.message); }
+
+// ── authoritative leaderboard: the ONLY thing allowed to write score paths in Firebase ──
+// (clients are read-only on these paths via the database rules)
+const clampI = (v,lo,hi)=>{ v=Math.round(Number(v)||0); return v<lo?lo : v>hi?hi : v; };
+const cleanName = s => String(s||'?').replace(/[<>"'\\\r\n]/g,'').trim().slice(0,16) || '?';
+const cleanUid  = s => String(s||'').replace(/[^a-zA-Z0-9_-]/g,'').slice(0,40);
+// each game maps a validated metric payload → the exact board rows the server will write.
+// scores are RECOMPUTED here from clamped metrics so the client can't just post a giant number.
+const SCORE_GAMES = {
+  skyhop: (b)=>{ const lvl=clampI(b.lvl,1,60), m=clampI(b.m,0,99999), done=b.done?1:0,
+      t=Math.round((Number(b.t)||0)*10)/10, points=clampI(b.points,0,9999999), coins=clampI(b.coins,0,9999999);
+      const score=lvl*1000+Math.min(999,m)+done*5000;
+      return [
+        { path:'skyhof', val:{lvl,m,t:Math.max(0,Math.min(9e6,t)),points,coins,done}, better:(n,o)=>!o||n.lvl>(o.lvl||0)||(n.lvl===(o.lvl||0)&&n.m>(o.m||0)) },
+        { path:'scores/skyhop', val:{score,lvl,m,done}, better:(n,o)=>!o||n.score>(o.score||0) },
+      ]; },
+  crossing: (b)=>{ const stage=clampI(b.stage,0,999), time=clampI(b.time,0,9000000), deaths=clampI(b.deaths,0,99999), done=b.done?1:0;
+      const score=stage*1000+Math.max(0,999-Math.min(999,Math.round(time)))+done*5000;
+      return [
+        { path:'cross', val:{stage,time,deaths,done}, better:(n,o)=>!o||n.stage>(o.stage||0)||(n.stage===(o.stage||0)&&n.time<(o.time==null?1e9:o.time)) },
+        { path:'scores/crossing', val:{score,stage,deaths,done}, better:(n,o)=>!o||n.score>(o.score||0) },
+      ]; },
+  bears: (b)=>{ const score=clampI(b.score,0,9999999), wave=clampI(b.wave,0,9999);
+      return [ { path:'scores/bears', val:{score,wave}, better:(n,o)=>!o||n.score>(o.score||0) } ]; },
+};
+async function submitScore(body){
+  const spec = SCORE_GAMES[String(body.game||'')];
+  if (!spec) return { ok:false, error:'unknown game' };
+  if (!adminDb) return { ok:false, error:'scores unavailable (server has no Firebase credential)' };
+  // identity: a VERIFIED uid when auth is on (no impersonation), else the client-reported uid
+  let uid = cleanUid(body.uid);
+  if (adminAuth && body.token){ try { uid = (await adminAuth.verifyIdToken(String(body.token))).uid; } catch(e){ /* fall back to reported uid */ } }
+  if (!uid) return { ok:false, error:'bad uid' };
+  const name = cleanName(body.name);
+  const rows = spec(body);
+  let wrote = 0;
+  for (const row of rows){
+    const ref = adminDb.ref('bici/'+row.path+'/'+uid);
+    const snap = await ref.once('value'); const cur = snap.val();
+    const next = Object.assign({ n:name, uid, d:Date.now() }, row.val);
+    if (row.better(next, cur)){ await ref.set(next); wrote++; }
+  }
+  return { ok:true, wrote };
+}
 const TICK_HZ = 20;                 // server simulation rate
 const NET_HZ = 15;                  // state broadcast rate
 const PLAYER_TIMEOUT = 600000;      // keep players while their socket is open (ws close handles real disconnects) — no vanishing
@@ -101,10 +147,24 @@ function ensureMonsters(room, key){
 
 const wss = new WebSocketServer({ noServer: true });
 const server = http.createServer((req,res)=>{
+  const cors = { 'access-control-allow-origin':'*', 'access-control-allow-methods':'POST, OPTIONS', 'access-control-allow-headers':'content-type' };
+  if (req.method==='OPTIONS'){ res.writeHead(204, cors); res.end(); return; }
+  if (req.method==='POST' && req.url==='/submit-score'){
+    let data=''; let tooBig=false;
+    req.on('data',c=>{ data+=c; if (data.length>4096){ tooBig=true; req.destroy(); } });
+    req.on('end', async ()=>{
+      res.writeHead(200, Object.assign({'content-type':'application/json'}, cors));
+      if (tooBig){ res.end(JSON.stringify({ok:false,error:'payload too large'})); return; }
+      let body; try { body=JSON.parse(data||'{}'); } catch(e){ res.end(JSON.stringify({ok:false,error:'bad json'})); return; }
+      try { const r=await submitScore(body); res.end(JSON.stringify(r)); }
+      catch(e){ console.error('[score] write failed:', e.message); res.end(JSON.stringify({ok:false,error:'server error'})); }
+    });
+    return;
+  }
   // a tiny health page so you can confirm the server is up in a browser
-  res.writeHead(200, {'content-type':'text/plain'});
+  res.writeHead(200, Object.assign({'content-type':'text/plain'}, cors));
   let n=0; rooms.forEach(r=>n+=r.players.size);
-  res.end('BICI authoritative server OK — '+rooms.size+' rooms, '+n+' players online');
+  res.end('BICI authoritative server '+SERVER_VERSION+' OK — '+rooms.size+' rooms, '+n+' players online · scores '+(adminDb?'ON':'OFF'));
 });
 server.on('upgrade', (req, socket, head)=>{
   wss.handleUpgrade(req, socket, head, ws=>wss.emit('connection', ws, req));
