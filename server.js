@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v13-games';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v14-instances';   // bump on each deploy so clients can confirm what's live
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -141,6 +141,51 @@ const MOB = {
 const byUid = new Map();
 const parties = new Map();
 const playerParty = new Map();
+// ══════════════ GAME INSTANCES — matchmaking for the add-on games ══════════════
+// Each add-on game (crossing / elycidash / dragonspire) is split into instances of at most
+// INST_CAP human players. When an instance fills, the next player opens a new one. A party
+// ALWAYS lands in one instance together: when the first member joins we reserve slots for the
+// rest, and a party of N never squeezes into an instance with fewer than N free slots.
+const MM_GAMES = new Set(['crossing','elycidash','skyhop']);   // skyhop = Dragonspire
+const INST_CAP = 10;                                           // max HUMAN players per instance
+const RESERVE_MS = 90000;                                      // hold a party-mate's slot this long
+const AFK_MS = +process.env.AFK_MS || 600000;                                         // 10 min with no movement/action → kicked (frees bandwidth)
+const gameInst = new Map();                                    // game -> [ {key, game, members:Set, reserved:Map<uid,exp>} ]
+function instList(game){ if(!gameInst.has(game)) gameInst.set(game,[]); return gameInst.get(game); }
+function instOcc(I){ let n=I.members.size; const now=Date.now(); for(const e of I.reserved.values()) if(e>now) n++; return n; }
+function newInstKey(game){ const used=new Set(instList(game).map(i=>i.key)); let n=1; while(used.has(game+'#'+n)) n++; return game+'#'+n; }
+function partyUids(uid){ const pid=playerParty.get(uid); if(!pid) return [uid]; const pt=parties.get(pid); return pt? [...pt.members] : [uid]; }
+function inAnyInstance(uid){ for(const list of gameInst.values()) for(const I of list) if(I.members.has(uid)) return true; return false; }
+function mmJoin(game, uid){
+  if(!MM_GAMES.has(game)) return null;
+  const list=instList(game);
+  let I=list.find(x=>x.members.has(uid)); if(I){ I.reserved.delete(uid); return I; }   // already placed
+  const mates=partyUids(uid).filter(u=>u!==uid && byUid.has(u));
+  I=list.find(x=>x.members.has(uid)||x.reserved.has(uid)||mates.some(u=>x.members.has(u)||x.reserved.has(u)));  // a party-mate is already here → stay together
+  if(!I){ const need=1+mates.length; I=list.find(x=>INST_CAP-instOcc(x) >= need) || null; }  // else an instance with room for the WHOLE party
+  if(!I){ I={ key:newInstKey(game), game, members:new Set(), reserved:new Map() }; list.push(I); }  // else a fresh instance
+  I.members.add(uid); I.reserved.delete(uid);
+  const now=Date.now();
+  for(const u of mates){ if(!I.members.has(u)) I.reserved.set(u, now+RESERVE_MS); }   // reserve the rest of the party
+  return I;
+}
+function mmLeave(game, uid){
+  const list=gameInst.get(game); if(!list) return;
+  for(const I of list){ I.members.delete(uid); I.reserved.delete(uid); }
+  gameInst.set(game, list.filter(I=>I.members.size>0 || instOcc(I)>0));
+}
+function mmLeaveAll(uid){ for(const game of [...gameInst.keys()]) mmLeave(game, uid); }
+function mmSweep(){   // expire stale reservations, drop empty instances, AFK-kick idle overworld sockets
+  const now=Date.now();
+  for(const [game,list] of gameInst){
+    for(const I of list){ for(const [u,exp] of [...I.reserved]) if(exp<=now || !byUid.has(u)) I.reserved.delete(u); }
+    gameInst.set(game, list.filter(I=>I.members.size>0 || I.reserved.size>0));
+  }
+  wss.clients.forEach(ws=>{ if(ws.readyState!==1 || !ws.uid) return;
+    if(inAnyInstance(ws.uid)) return;                                  // actively in a game instance → never AFK
+    if(now-(ws.lastAct||now) > AFK_MS){ try{send(ws,{t:'afk'});}catch(e){} try{ws.close();}catch(e){} }   // idle too long → free the bandwidth
+  });
+}
 const ROOM_SPAWN = {
   'wild':       { kinds: ['gnome','imp','kobold','boggart'], n: 6 },
   // 'glades' (the EAST gate) removed — like westgate it runs client-side Warden waves, so the server
@@ -218,6 +263,8 @@ wss.on('connection', (ws)=>{
     if (_t - (ws._win||0) > 1000){ ws._win = _t; ws._cnt = 0; }
     if (++ws._cnt > MSG_PER_S) return;                            // flood: silently drop
     let m; try { m = JSON.parse(buf); } catch(e){ return; }
+    // AFK timer: movement & actions keep you alive; idle position heartbeats do not
+    if (m.t==='pos'){ if (m.mv || m.act) ws.lastAct=_t; } else if (m.t) ws.lastAct=_t;
     if (m.t === 'join'){
       // verify identity when token-checking is enabled
       let verifiedUid = null;
@@ -358,8 +405,16 @@ wss.on('connection', (ws)=>{
     else if (m.t === 'respawn' && ws.room){            // client told us the player respawned
       const p = rooms.get(ws.room)?.players.get(ws.uid); if (p){ p.hp = p.mh; p.dead=false; if(m.x)p.sx=p.x=+m.x; if(m.y)p.sy=p.y=+m.y; }
     }
+    else if (m.t === 'mm'){                            // matchmaking: place me (and my party) into an instance of an add-on game
+      const game=String(m.game||'');
+      const I=mmJoin(game, ws.uid);
+      send(ws, { t:'mm', game, instance: I?I.key:null, cap: INST_CAP });
+    }
+    else if (m.t === 'mm_leave'){                      // I left the add-on game → free my instance slot
+      mmLeave(String(m.game||''), ws.uid);
+    }
   });
-  ws.on('close', ()=>{ if (ws.room){ const r = rooms.get(ws.room); if (r) r.players.delete(ws.uid); } const pid=playerParty.get(ws.uid); leaveParty(ws.uid); if(pid)sendParty(pid); byUid.delete(ws.uid); });
+  ws.on('close', ()=>{ if (ws.room){ const r = rooms.get(ws.room); if (r) r.players.delete(ws.uid); } const pid=playerParty.get(ws.uid); leaveParty(ws.uid); if(pid)sendParty(pid); mmLeaveAll(ws.uid); byUid.delete(ws.uid); });
   ws.on('error', ()=>{});
 });
 
@@ -451,6 +506,8 @@ setInterval(()=>{
     }
   });
 }, 1000/NET_HZ);
+
+setInterval(mmSweep, +process.env.MM_SWEEP || 15000);   // expire reservations, drop empty instances, AFK-kick idle overworld sockets
 
 server.listen(PORT, ()=>{
   console.log('BICI authoritative server '+SERVER_VERSION+' listening on :'+PORT);
