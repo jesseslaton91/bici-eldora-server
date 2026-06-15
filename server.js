@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION='v12-creator';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v13-games';   // bump on each deploy so clients can confirm what's live
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -25,41 +25,78 @@ try {
     adminDb = admin.database();          // the server now owns all leaderboard writes
     console.log('[auth] Firebase ENABLED — token verification + authoritative score writes.');
   } else {
-    console.log('[auth] FIREBASE_SERVICE_ACCOUNT not set — running WITHOUT token verification, and SCORES CANNOT BE SAVED. Set the env var to enable the authoritative leaderboard.');
+    console.log('\n========================================================');
+    console.log('  WARNING: FIREBASE_SERVICE_ACCOUNT is NOT set.');
+    console.log('  -> Tokens are NOT verified and SCORES WILL NOT SAVE.');
+    console.log('  -> Set FIREBASE_SERVICE_ACCOUNT (the service-account JSON)');
+    console.log('     in the host environment to enable the authoritative');
+    console.log('     leaderboard and identity checks.');
+    console.log('========================================================\n');
   }
 } catch (e) { console.error('[auth] admin init failed (running open):', e.message); }
 
 // ── authoritative leaderboard: the ONLY thing allowed to write score paths in Firebase ──
 // (clients are read-only on these paths via the database rules)
 const clampI = (v,lo,hi)=>{ v=Math.round(Number(v)||0); return v<lo?lo : v>hi?hi : v; };
+const clampF = (v,lo,hi)=>{ v=Number(v)||0; return v<lo?lo : v>hi?hi : v; };
 const cleanName = s => String(s||'?').replace(/[<>"'\\\r\n]/g,'').trim().slice(0,16) || '?';
 const cleanUid  = s => String(s||'').replace(/[^a-zA-Z0-9_-]/g,'').slice(0,40);
 // each game maps a validated metric payload → the exact board rows the server will write.
 // scores are RECOMPUTED here from clamped metrics so the client can't just post a giant number.
 const SCORE_GAMES = {
   skyhop: (b)=>{ const lvl=clampI(b.lvl,1,60), m=clampI(b.m,0,99999), done=b.done?1:0,
-      t=Math.round((Number(b.t)||0)*10)/10, points=clampI(b.points,0,9999999), coins=clampI(b.coins,0,9999999);
-      const score=lvl*1000+Math.min(999,m)+done*5000;
+      t=Math.round((Number(b.t)||0)*10)/10, points=clampI(b.points,0,9999999), coins=clampI(b.coins,0,9999999), deaths=clampI(b.deaths,0,99999);
+      // Town Hall rank: LEVEL reached/finished dominates, then TIME (lower=better), then DEATHS (each ~2s). Distance is NOT used here.
+      const Lp=Math.min(lvl,60)+done, timeScore=Math.max(0,1000000-Math.round((t+deaths*2)*10));
+      const score=Lp*10000000+timeScore;
       return [
-        { path:'skyhof', val:{lvl,m,t:Math.max(0,Math.min(9e6,t)),points,coins,deaths:clampI(b.deaths,0,99999),done}, better:(n,o)=>!o||n.lvl>(o.lvl||0)||(n.lvl===(o.lvl||0)&&n.m>(o.m||0)) },
-        { path:'scores/skyhop', val:{score,lvl,m,done}, better:(n,o)=>!o||n.score>(o.score||0) },
+        // in-game Dragonspire board keeps distance (m) for the climber HoF:
+        { path:'skyhof', val:{lvl,m,t:Math.max(0,Math.min(9e6,t)),points,coins,deaths,done}, better:(n,o)=>!o||n.lvl>(o.lvl||0)||(n.lvl===(o.lvl||0)&&n.m>(o.m||0)) },
+        // Town Hall board: level → time → deaths (no distance):
+        { path:'scores/skyhop', val:{score,lvl,t:Math.max(0,Math.min(9e6,t)),deaths,done}, better:(n,o)=>!o||n.score>(o.score||0) },
       ]; },
-  crossing: (b)=>{ const stage=clampI(b.stage,0,999), time=clampI(b.time,0,9000000), deaths=clampI(b.deaths,0,99999), done=b.done?1:0;
-      const score=stage*1000+Math.max(0,999-Math.min(999,Math.round(time)))+done*5000;
+  crossing: (b)=>{ const stage=clampI(b.stage,1,10), done=b.done?1:0, t=clampF(b.time,0,99999), deaths=clampI(b.deaths,0,99999);
+      // Town Hall rank: stage reached/finished dominates, then time (lower=better), then deaths (~2s each)
+      const score=(stage+done)*1e7 + Math.max(0, 1e6 - Math.round((t + deaths*2)*10));
       return [
-        { path:'cross', val:{stage,time,deaths,done}, better:(n,o)=>!o||n.stage>(o.stage||0)||(n.stage===(o.stage||0)&&n.time<(o.time==null?1e9:o.time)) },
+        // in-game Crossing board: stage, then faster time
+        { path:'cross', val:{stage,time:Math.round(t*10)/10,deaths,done}, better:(n,o)=>!o||(n.stage>(o.stage||0))||(n.stage===(o.stage||0)&&n.time<(o.time==null?1e9:o.time)) },
+        // Town Hall board:
         { path:'scores/crossing', val:{score,stage,deaths,done}, better:(n,o)=>!o||n.score>(o.score||0) },
       ]; },
-  bears: (b)=>{ const score=clampI(b.score,0,9999999), wave=clampI(b.wave,0,9999);
-      return [ { path:'scores/bears', val:{score,wave}, better:(n,o)=>!o||n.score>(o.score||0) } ]; },
+  bears: (b)=>{
+      const won   = b.won ? 1 : 0;
+      const wave  = clampI(b.wave,  0, 30);
+      const t     = clampI(b.t,     0, 86400);   // survival seconds
+      const kills = clampI(b.kills, 0, 9999999);
+      const bossK = clampI(b.bossK, 0, 99999);
+      // bands so the top factor can never be overtaken: WIN >> deeper WAVE >> (wins: faster | losses: longer+kills)
+      const score = won*1e10
+                  + wave*1e6
+                  + (won ? Math.max(0, 1e6 - t*10) : Math.min(999999, t*2 + kills))
+                  + Math.min(9999, kills);
+      return [ { path:'scores/bears', val:{ score, wave, won, kills, bossK, t }, better:(n,o)=>!o || n.score > (o.score||0) } ];
+    },
+  elycidash: (b)=>{ const rounds=clampI(b.rounds,0,10), done=b.done?1:0, t=clampF(b.t,0,99999),
+      berries=clampI(b.berries,0,99999), combo=clampI(b.combo,0,9999);
+      // rounds reached/finished dominate (top band), then faster time, then berries & combo as small bonuses
+      const score=(Math.min(rounds,10)+done)*1e7 + Math.max(0, 1e6 - Math.round(t*10)) + berries*10 + combo*30;
+      return [ { path:'scores/elycidash', val:{score,rounds,t:Math.round(t*10)/10,berries,combo,done}, better:(n,o)=>!o||n.score>(o.score||0) } ];
+    },
 };
 async function submitScore(body){
   const spec = SCORE_GAMES[String(body.game||'')];
   if (!spec) return { ok:false, error:'unknown game' };
   if (!adminDb) return { ok:false, error:'scores unavailable (server has no Firebase credential)' };
-  // identity: a VERIFIED uid when auth is on (no impersonation), else the client-reported uid
-  let uid = cleanUid(body.uid);
-  if (adminAuth && body.token){ try { uid = (await adminAuth.verifyIdToken(String(body.token))).uid; } catch(e){ /* fall back to reported uid */ } }
+  // identity: when auth is enabled it is REQUIRED and verified — no impersonation, no client-uid fallback
+  let uid;
+  if (adminAuth){
+    if (!body.token) return { ok:false, error:'auth required' };
+    try { uid = (await adminAuth.verifyIdToken(String(body.token))).uid; }
+    catch(e){ return { ok:false, error:'bad token' }; }
+  } else {
+    uid = cleanUid(body.uid);   // only reachable in dev mode with no Firebase credential (and adminDb is null, so scores aren't saved anyway)
+  }
   if (!uid) return { ok:false, error:'bad uid' };
   const name = cleanName(body.name);
   const rows = spec(body);
@@ -415,4 +452,8 @@ setInterval(()=>{
   });
 }, 1000/NET_HZ);
 
-server.listen(PORT, ()=>console.log('BICI authoritative server '+SERVER_VERSION+' listening on :'+PORT));
+server.listen(PORT, ()=>{
+  console.log('BICI authoritative server '+SERVER_VERSION+' listening on :'+PORT);
+  if(adminDb) console.log('  \u2713 Scores ON \u2014 Firebase token verification + authoritative writes active.');
+  else        console.log('  \u26a0  Scores OFF \u2014 set FIREBASE_SERVICE_ACCOUNT to turn them on (see warning above).');
+});
