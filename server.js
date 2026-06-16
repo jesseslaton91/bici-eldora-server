@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v14-instances';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v16-dragonspire';   // bump on each deploy so clients can confirm what's live
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -44,16 +44,16 @@ const cleanUid  = s => String(s||'').replace(/[^a-zA-Z0-9_-]/g,'').slice(0,40);
 // each game maps a validated metric payload → the exact board rows the server will write.
 // scores are RECOMPUTED here from clamped metrics so the client can't just post a giant number.
 const SCORE_GAMES = {
-  skyhop: (b)=>{ const lvl=clampI(b.lvl,1,60), m=clampI(b.m,0,99999), done=b.done?1:0,
+  dragonspire: (b)=>{ const lvl=clampI(b.lvl,1,60), m=clampI(b.m,0,99999), done=b.done?1:0, seed=clampI(b.seed,0,10),
       t=Math.round((Number(b.t)||0)*10)/10, points=clampI(b.points,0,9999999), coins=clampI(b.coins,0,9999999), deaths=clampI(b.deaths,0,99999);
       // Town Hall rank: LEVEL reached/finished dominates, then TIME (lower=better), then DEATHS (each ~2s). Distance is NOT used here.
       const Lp=Math.min(lvl,60)+done, timeScore=Math.max(0,1000000-Math.round((t+deaths*2)*10));
       const score=Lp*10000000+timeScore;
       return [
         // in-game Dragonspire board keeps distance (m) for the climber HoF:
-        { path:'skyhof', val:{lvl,m,t:Math.max(0,Math.min(9e6,t)),points,coins,deaths,done}, better:(n,o)=>!o||n.lvl>(o.lvl||0)||(n.lvl===(o.lvl||0)&&n.m>(o.m||0)) },
+        { path:'scores/dragonspire-climb', k:(seed>0?'_m'+seed:''), val:{lvl,m,t:Math.max(0,Math.min(9e6,t)),points,coins,deaths,done,seed}, better:(n,o)=>!o||n.lvl>(o.lvl||0)||(n.lvl===(o.lvl||0)&&n.m>(o.m||0)) },
         // Town Hall board: level → time → deaths (no distance):
-        { path:'scores/skyhop', val:{score,lvl,t:Math.max(0,Math.min(9e6,t)),deaths,done}, better:(n,o)=>!o||n.score>(o.score||0) },
+        { path:'scores/dragonspire', k:(seed>0?'_m'+seed:''), val:{score,lvl,t:Math.max(0,Math.min(9e6,t)),deaths,done,seed}, better:(n,o)=>!o||n.score>(o.score||0) },
       ]; },
   crossing: (b)=>{ const stage=clampI(b.stage,1,10), done=b.done?1:0, t=clampF(b.time,0,99999), deaths=clampI(b.deaths,0,99999);
       // Town Hall rank: stage reached/finished dominates, then time (lower=better), then deaths (~2s each)
@@ -102,7 +102,7 @@ async function submitScore(body){
   const rows = spec(body);
   let wrote = 0;
   for (const row of rows){
-    const ref = adminDb.ref('bici/'+row.path+'/'+uid);
+    const ref = adminDb.ref('bici/'+row.path+'/'+(uid+(row.k||'')));
     const snap = await ref.once('value'); const cur = snap.val();
     const next = Object.assign({ n:name, uid, d:Date.now() }, row.val);
     if (row.better(next, cur)){ await ref.set(next); wrote++; }
@@ -146,7 +146,7 @@ const playerParty = new Map();
 // INST_CAP human players. When an instance fills, the next player opens a new one. A party
 // ALWAYS lands in one instance together: when the first member joins we reserve slots for the
 // rest, and a party of N never squeezes into an instance with fewer than N free slots.
-const MM_GAMES = new Set(['crossing','elycidash','skyhop']);   // skyhop = Dragonspire
+const MM_GAMES = new Set(['crossing','elycidash','dragonspire']);   // dragonspire = the climber game
 const INST_CAP = 10;                                           // max HUMAN players per instance
 const RESERVE_MS = 90000;                                      // hold a party-mate's slot this long
 const AFK_MS = +process.env.AFK_MS || 600000;                                         // 10 min with no movement/action → kicked (frees bandwidth)
