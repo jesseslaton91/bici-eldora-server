@@ -78,11 +78,10 @@ const SCORE_GAMES = {
       const t     = clampI(b.t,     0, 86400);   // survival seconds
       const kills = clampI(b.kills, 0, 9999999);
       const bossK = clampI(b.bossK, 0, 99999);
-      // bands so the top factor can never be overtaken: WIN >> deeper WAVE >> (wins: faster | losses: longer+kills)
-      const score = won*1e10
-                  + wave*1e6
-                  + (won ? Math.max(0, 1e6 - t*10) : Math.min(999999, t*2 + kills))
-                  + Math.min(9999, kills);
+      // Town Hall rank: COMPLETED >> WAVES SURVIVED >> TOTAL KILLS
+      const score = won*1e10                 // 1) completed (any win beats any loss)
+                  + wave*1e6                 // 2) waves survived
+                  + Math.min(999999, kills); // 3) total kills (tiebreaker)
       return [ { path:'scores/bears', val:{ score, wave, won, kills, bossK, t }, better:(n,o)=>!o || n.score > (o.score||0) } ];
     },
   elycidash: (b)=>{ const rounds=clampI(b.rounds,0,10), done=b.done?1:0, t=clampF(b.t,0,99999),
@@ -164,8 +163,9 @@ function instOcc(I){ let n=I.members.size; const now=Date.now(); for(const e of 
 function newInstKey(game){ const used=new Set(instList(game).map(i=>i.key)); let n=1; while(used.has(game+'#'+n)) n++; return game+'#'+n; }
 function partyUids(uid){ const pid=playerParty.get(uid); if(!pid) return [uid]; const pt=parties.get(pid); return pt? [...pt.members] : [uid]; }
 function inAnyInstance(uid){ for(const list of gameInst.values()) for(const I of list) if(I.members.has(uid)) return true; return false; }
+function curSeed(){ return 1 + (Math.floor(Date.now()/1800000) % 10); }   // same rotation the add-on clients use
 function mmJoin(game, uid){
-  if(!MM_GAMES.has(game)) return null;
+  if(!MM_GAMES.has(String(game).split('@')[0])) return null;
   const list=instList(game);
   let I=list.find(x=>x.members.has(uid)); if(I){ I.reserved.delete(uid); return I; }   // already placed
   const mates=partyUids(uid).filter(u=>u!==uid && byUid.has(u));
@@ -178,9 +178,12 @@ function mmJoin(game, uid){
   return I;
 }
 function mmLeave(game, uid){
-  const list=gameInst.get(game); if(!list) return;
-  for(const I of list){ I.members.delete(uid); I.reserved.delete(uid); }
-  gameInst.set(game, list.filter(I=>I.members.size>0 || instOcc(I)>0));
+  const base=String(game).split('@')[0];
+  for(const g of [...gameInst.keys()]){ if(g!==base && g.split('@')[0]!==base) continue;
+    const list=gameInst.get(g); if(!list) continue;
+    for(const I of list){ I.members.delete(uid); I.reserved.delete(uid); }
+    gameInst.set(g, list.filter(I=>I.members.size>0 || instOcc(I)>0));
+  }
 }
 function mmLeaveAll(uid){ for(const game of [...gameInst.keys()]) mmLeave(game, uid); }
 function mmSweep(){   // expire stale reservations, drop empty instances, AFK-kick idle overworld sockets
@@ -415,7 +418,8 @@ wss.on('connection', (ws)=>{
     }
     else if (m.t === 'mm'){                            // matchmaking: place me (and my party) into an instance of an add-on game
       const game=String(m.game||'');
-      const I=mmJoin(game, ws.uid);
+      const skey = MM_GAMES.has(game) ? (game+'@s'+curSeed()) : game;   // seed-scope: instance-mates always share the map seed
+      const I=mmJoin(skey, ws.uid);
       send(ws, { t:'mm', game, instance: I?I.key:null, cap: INST_CAP });
     }
     else if (m.t === 'mm_leave'){                      // I left the add-on game → free my instance slot
