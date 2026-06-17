@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v17-dragonmodes';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v18-crossmodes';   // bump on each deploy so clients can confirm what's live
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -63,15 +63,15 @@ const SCORE_GAMES = {
   'dragonspire-ez': (b)=>{ const lvl=clampI(b.lvl,1,60), m=clampI(b.m,0,99999), done=b.done?1:0, seed=clampI(b.seed,0,10),
       t=Math.round((Number(b.t)||0)*10)/10, points=clampI(b.points,0,9999999), coins=clampI(b.coins,0,9999999), deaths=clampI(b.deaths,0,99999);
       return [ { path:'scores/dragonspire-ez', k:(seed>0?'_m'+seed:''), val:{lvl,m,t:Math.max(0,Math.min(9e6,t)),points,coins,deaths,done,seed}, better:(n,o)=>!o||n.lvl>(o.lvl||0)||(n.lvl===(o.lvl||0)&&n.m>(o.m||0)) } ]; },
-  crossing: (b)=>{ const stage=clampI(b.stage,1,10), done=b.done?1:0, t=clampF(b.time,0,99999), deaths=clampI(b.deaths,0,99999);
-      // Town Hall rank: stage reached/finished dominates, then time (lower=better), then deaths (~2s each)
+  crossing: (b)=>{ const stage=clampI(b.stage,1,10), done=b.done?1:0, t=clampF(b.time,0,99999), deaths=clampI(b.deaths,0,99999), seed=clampI(b.seed,0,10);
       const score=(stage+done)*1e7 + Math.max(0, 1e6 - Math.round((t + deaths*2)*10));
-      return [
-        // in-game Crossing board: stage, then faster time
-        { path:'cross', val:{stage,time:Math.round(t*10)/10,deaths,done}, better:(n,o)=>!o||(n.stage>(o.stage||0))||(n.stage===(o.stage||0)&&n.time<(o.time==null?1e9:o.time)) },
-        // Town Hall board:
-        { path:'scores/crossing', val:{score,stage,deaths,done}, better:(n,o)=>!o||n.score>(o.score||0) },
-      ]; },
+      return [ { path:'scores/crossing', k:(seed>0?'_m'+seed:''), val:{score,stage,time:Math.round(t*10)/10,deaths,done,seed}, better:(n,o)=>!o||n.score>(o.score||0) } ]; },
+  'crossing-hc': (b)=>{ const stage=clampI(b.stage,1,10), done=b.done?1:0, t=clampF(b.time,0,99999), deaths=clampI(b.deaths,0,99999), seed=clampI(b.seed,0,10);
+      const score=(stage+done)*1e7 + Math.max(0, 1e6 - Math.round((t + deaths*2)*10));
+      return [ { path:'scores/crossing-hc', k:(seed>0?'_m'+seed:''), val:{score,stage,time:Math.round(t*10)/10,deaths,done,seed}, better:(n,o)=>!o||n.score>(o.score||0) } ]; },
+  'crossing-ez': (b)=>{ const stage=clampI(b.stage,1,10), done=b.done?1:0, t=clampF(b.time,0,99999), deaths=clampI(b.deaths,0,99999), seed=clampI(b.seed,0,10);
+      const score=(stage+done)*1e7 + Math.max(0, 1e6 - Math.round((t + deaths*2)*10));
+      return [ { path:'scores/crossing-ez', k:(seed>0?'_m'+seed:''), val:{score,stage,time:Math.round(t*10)/10,deaths,done,seed}, better:(n,o)=>!o||n.score>(o.score||0) } ]; },
   bears: (b)=>{
       const won   = b.won ? 1 : 0;
       const wave  = clampI(b.wave,  0, 30);
@@ -154,7 +154,7 @@ const playerParty = new Map();
 // INST_CAP human players. When an instance fills, the next player opens a new one. A party
 // ALWAYS lands in one instance together: when the first member joins we reserve slots for the
 // rest, and a party of N never squeezes into an instance with fewer than N free slots.
-const MM_GAMES = new Set(['crossing','elycidash','dragonspire','dragonspire-hc','dragonspire-ez']);   // dragonspire = the climber game
+const MM_GAMES = new Set(['crossing','crossing-hc','crossing-ez','elycidash','dragonspire','dragonspire-hc','dragonspire-ez']);   // dragonspire = the climber game
 const INST_CAP = 10;                                           // max HUMAN players per instance
 const RESERVE_MS = 90000;                                      // hold a party-mate's slot this long
 const AFK_MS = +process.env.AFK_MS || 600000;                                         // 10 min with no movement/action → kicked (frees bandwidth)
