@@ -156,7 +156,7 @@ const playerParty = new Map();
 const MM_GAMES = new Set(['crossing','crossing-hc','crossing-ez','elycidash','dragonspire','dragonspire-hc','dragonspire-ez']);   // dragonspire = the climber game
 const INST_CAP = 10;                                           // max HUMAN players per instance
 const RESERVE_MS = 90000;                                      // hold a party-mate's slot this long
-const AFK_MS = +process.env.AFK_MS || 600000;                                         // 10 min with no movement/action → kicked (frees bandwidth)
+const AFK_MS = +process.env.AFK_MS || 1800000;                                         // 10 min with no movement/action → kicked (frees bandwidth)
 const gameInst = new Map();                                    // game -> [ {key, game, members:Set, reserved:Map<uid,exp>} ]
 function instList(game){ if(!gameInst.has(game)) gameInst.set(game,[]); return gameInst.get(game); }
 function instOcc(I){ let n=I.members.size; const now=Date.now(); for(const e of I.reserved.values()) if(e>now) n++; return n; }
