@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v19-towntrees';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v22-guildwave2';   // bump on each deploy so clients can confirm what's live
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -300,7 +300,7 @@ wss.on('connection', (ws)=>{
       room.players.set(ws.uid, {
         ws, uid: ws.uid, n: String(m.name||'?').slice(0,16),
         x:+m.x||0, y:+m.y||0, dir:'down', mv:0, fl:0, act:'',
-        hp:+m.hp||30, mh:+m.maxhp||30, av:m.av||{}, pet:m.pet||'',
+        hp:+m.hp||30, mh:+m.maxhp||30, av:m.av||{}, pet:m.pet||'', wp:m.wp||'',
         lvl: Math.max(1, Math.min(60, +m.lvl||1)), maxhit: maxHitFor(m.lvl),
         duel: null,
         sx:+m.x||0, sy:+m.y||0, last: Date.now(), dead:false
@@ -308,6 +308,18 @@ wss.on('connection', (ws)=>{
       send(ws, { t:'joined', room: ws.room, ver: SERVER_VERSION, proto: PROTOCOL });
       if (ws.room === 'town'){ const _now=Date.now();
         send(ws, { t:'townstate', cut:Object.keys(TOWN.cut), ores:TOWN.ores.map(o=>({id:o.id, rem:Math.max(0,(o.up-_now))/1000})) }); }
+    }
+    else if (m.t === 'wavesync' && ws.room){              // guild-wave host → other members in the same room
+      const room = rooms.get(ws.room); if(!room) return;
+      const s = JSON.stringify({ t:'wavesync', from:ws.uid, active:m.active?1:0, n:+m.n||0,
+        heart:+m.heart||0, hmax:+m.hmax||100, mobs:Array.isArray(m.mobs)?m.mobs.slice(0,60):[] });
+      for (const p of room.players.values()) if (p.uid!==ws.uid && p.ws.readyState===1) p.ws.send(s);
+    }
+    else if (m.t === 'wavehit' && ws.room){               // a member damaged a shared mob → tell everyone; the host applies it
+      broadcast(ws.room, { t:'wavehit', from:ws.uid, i:m.i, dmg:Math.min(DMG_CAP,Math.max(0,Math.round(+m.dmg||0))) });
+    }
+    else if (m.t === 'wavekill' && ws.room){              // host decided a shared mob died → everyone removes it; the credited killer loots
+      broadcast(ws.room, { t:'wavekill', i:m.i, by:m.by, tier:+m.tier||1, bid:m.bid, boss:m.boss?1:0, x:+m.x||0, y:+m.y||0 });
     }
     else if (m.t === 'townchop' && ws.room === 'town'){
       const id = String(m.id||'').slice(0,28); if(!id) return;
@@ -326,6 +338,7 @@ wss.on('connection', (ws)=>{
       p.dir=String(m.dir||p.dir).slice(0,6); p.mv=m.mv?1:0; p.fl=m.fl?1:0;
       if (m.act) p.act = m.act+'|'+Date.now();
       if (m.pet!=null) p.pet=m.pet;
+      if (m.wp!=null) p.wp=String(m.wp).slice(0,24);
       if (m.maxhp) p.mh=+m.maxhp;
       if (m.lvl){ p.lvl=Math.max(1,Math.min(60,+m.lvl)); p.maxhit=maxHitFor(p.lvl); }
       p.last = Date.now();
@@ -526,7 +539,7 @@ setInterval(()=>{
       const plrs = [];
       for (const q of room.players.values()){
         if (q.uid === p.uid) continue;
-        plrs.push({ uid:q.uid, n:q.n, x:Math.round(q.x), y:Math.round(q.y), dir:q.dir, mv:q.mv, fl:q.fl, act:q.act, hp:q.hp, mh:q.mh, av:q.av, pet:q.pet });
+        plrs.push({ uid:q.uid, n:q.n, x:Math.round(q.x), y:Math.round(q.y), dir:q.dir, mv:q.mv, fl:q.fl, act:q.act, hp:q.hp, mh:q.mh, av:q.av, pet:q.pet, wp:q.wp });
       }
       send(p.ws, { t:'state', mons, plrs, hp:p.hp, mh:p.mh });
     }
