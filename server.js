@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v18-crossmodes';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v19-towntrees';   // bump on each deploy so clients can confirm what's live
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -214,6 +214,9 @@ function spawnCfg(roomKey){
   return null; // towns / interiors: no monsters
 }
 
+const TOWN = { cut:{}, ores:[ {id:'tore0', up:0}, {id:'tore1', up:0} ] };   // shared: chopped town trees (id->cutMs) + 2 iron ores (up=respawn ms)
+const TOWN_REGROW = 900000;   // town trees regrow after 15 min, for everyone at once
+const ORE_REGROW  = 120000;   // a shared iron ore respawns 2 min after it's mined
 const rooms = new Map(); // roomKey -> { players:Map, mons:[], geo:{w,h,tile}, seq }
 function getRoom(key){
   if (!rooms.has(key)) rooms.set(key, { players: new Map(), mons: [], geo: null, seq: 1 });
@@ -303,6 +306,17 @@ wss.on('connection', (ws)=>{
         sx:+m.x||0, sy:+m.y||0, last: Date.now(), dead:false
       });
       send(ws, { t:'joined', room: ws.room, ver: SERVER_VERSION, proto: PROTOCOL });
+      if (ws.room === 'town'){ const _now=Date.now();
+        send(ws, { t:'townstate', cut:Object.keys(TOWN.cut), ores:TOWN.ores.map(o=>({id:o.id, rem:Math.max(0,(o.up-_now))/1000})) }); }
+    }
+    else if (m.t === 'townchop' && ws.room === 'town'){
+      const id = String(m.id||'').slice(0,28); if(!id) return;
+      if (!TOWN.cut[id]){ TOWN.cut[id] = _t; broadcast('town', { t:'townchop', id }); }   // record + tell everyone in town
+    }
+    else if (m.t === 'townmine' && ws.room === 'town'){
+      const id = String(m.id||'').slice(0,12); const ore = TOWN.ores.find(o=>o.id===id); if(!ore) return;
+      if (ore.up > _t) return;                                   // already depleted
+      ore.up = _t + ORE_REGROW; broadcast('town', { t:'oreup', id, rem: ORE_REGROW/1000 });
     }
     else if (m.t === 'pos' && ws.room){
       const room = rooms.get(ws.room); const p = room?.players.get(ws.uid); if (!p) return;
@@ -519,6 +533,11 @@ setInterval(()=>{
   });
 }, 1000/NET_HZ);
 
+setInterval(()=>{ const now=Date.now(); const grew=[];
+  for (const id in TOWN.cut){ if (now - TOWN.cut[id] > TOWN_REGROW){ delete TOWN.cut[id]; grew.push(id); } }
+  if (grew.length) broadcast('town', { t:'townregrow', ids:grew });
+  for (const ore of TOWN.ores){ if (ore.up && ore.up <= now){ ore.up = 0; broadcast('town', { t:'oreup', id:ore.id, rem:0 }); } }
+}, 5000);   // shared town tree regrow + ore respawn
 setInterval(mmSweep, +process.env.MM_SWEEP || 15000);   // expire reservations, drop empty instances, AFK-kick idle overworld sockets
 
 server.listen(PORT, ()=>{
