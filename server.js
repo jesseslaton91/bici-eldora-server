@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v24-gbuild';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v25-ogre';   // bump on each deploy so clients can confirm what's live
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -198,7 +198,7 @@ function mmSweep(){   // expire stale reservations, drop empty instances, AFK-ki
   });
 }
 const ROOM_SPAWN = {
-  'wild':       { kinds: ['gnome','imp','kobold','boggart'], n: 6 },
+  // 'wild' (Elyci Forest) removed — it is now stalked by a single client-side Two-Headed Ogre, no basic monsters.
   // 'glades' (the EAST gate) removed — like westgate it runs client-side Warden waves, so the server
   // no longer spawns its own monsters there (those were the invisible-to-the-player attackers).
   // 'westgate' removed: the gate is driven by the client-side Warden waves, so the server no longer
@@ -450,6 +450,9 @@ wss.on('connection', (ws)=>{
     else if (m.t === 'sethp' && ws.room){            // client healed (fountain/potion/ability) — raise our record to match
       const p = rooms.get(ws.room)?.players.get(ws.uid);
       if (p && !p.dead){ if(m.mh) p.mh = Math.max(1, Math.min(9999, +m.mh)); const v = Math.max(0, Math.min(p.mh, +m.hp||0)); if (v > p.hp) p.hp = v; }
+    }
+    else if ((m.t === 'pdeath' || m.t === 'previve') && ws.room){   // a hero announces their own knockout / revival → everyone watching sees it (wave mobs are client-side, so hp alone won't show it)
+      broadcast(ws.room, { t: m.t, uid: ws.uid });
     }
     else if (m.t === 'respawn' && ws.room){            // client told us the player respawned
       const p = rooms.get(ws.room)?.players.get(ws.uid); if (p){ p.hp = p.mh; p.dead=false; if(m.x)p.sx=p.x=+m.x; if(m.y)p.sy=p.y=+m.y; }
