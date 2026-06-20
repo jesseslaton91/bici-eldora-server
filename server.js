@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v23-invite';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v24-gbuild';   // bump on each deploy so clients can confirm what's live
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -124,7 +124,7 @@ const DMG_CAP   = 150;   // max damage accepted per hit (stops 9999 one-shots)
 const HIT_COOL  = 130;   // ms between accepted hits from one player (stops machine-gun hits)
 const HIT_RANGE = 220;   // player must be within this many px of the monster to damage it
 const MSG_PER_S = 60;    // max messages/sec per connection before we ignore the flood
-const MAX_MSG_BYTES = 4000;
+const MAX_MSG_BYTES = 20000;   // guild-build snapshots (full yard) can be large
 const MAX_PLAYERS_PER_ROOM = 60;
 const DUEL_HP = 100;       // fixed, fair HP for friendly duels (server-owned)
 const DUEL_LEN = 60000;    // 60s → draw
@@ -320,6 +320,12 @@ wss.on('connection', (ws)=>{
     }
     else if (m.t === 'wavekill' && ws.room){              // host decided a shared mob died → everyone removes it; the credited killer loots
       broadcast(ws.room, { t:'wavekill', i:m.i, by:m.by, tier:+m.tier||1, bid:m.bid, boss:m.boss?1:0, x:+m.x||0, y:+m.y||0 });
+    }
+    else if (m.t === 'gbuild' && ws.room){                // MULTIPLAYER RULE: a guildmate built/moved/removed something → everyone in the yard sees it instantly
+      const gid = String(m.gid||'').slice(0,48);
+      const build = Array.isArray(m.build) ? m.build.slice(0,400).map(p=>({id:String(p.id||'').slice(0,24),x:+p.x|0,y:+p.y|0,rot:+p.rot|0,lv:p.lv?(+p.lv|0):undefined})) : [];
+      const heart = (m.heart && typeof m.heart==='object') ? {x:+m.heart.x|0,y:+m.heart.y|0} : null;
+      broadcast(ws.room, { t:'gbuild', from:ws.uid, gid, build, heart });
     }
     else if (m.t === 'townchop' && ws.room === 'town'){
       const id = String(m.id||'').slice(0,28); if(!id) return;
