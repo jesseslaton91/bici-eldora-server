@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v22-guildwave2';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v23-invite';   // bump on each deploy so clients can confirm what's live
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -395,6 +395,11 @@ wss.on('connection', (ws)=>{
       if (pt.members.size >= 4){ send(ws,{t:'party_full'}); return; }
       pt.members.add(ws.uid); playerParty.set(ws.uid, pid);
       sendParty(pid);
+      send(inv, { t:'invite_result', kind:'party', result:'joined', byN: ws.name||'A hero' });
+    }
+    else if (m.t === 'party_decline'){
+      const inv = byUid.get(String(m.to)); if (!inv) return;
+      send(inv, { t:'invite_result', kind:'party', result: m.expired?'expired':'declined', byN: ws.name||'A hero' });
     }
     else if (m.t === 'party_leave'){
       const pid = playerParty.get(ws.uid);
