@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v25-ogre';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v26-guildsync';   // bump on each deploy so clients can confirm what's live
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -311,7 +311,7 @@ wss.on('connection', (ws)=>{
     }
     else if (m.t === 'wavesync' && ws.room){              // guild-wave host → other members in the same room
       const room = rooms.get(ws.room); if(!room) return;
-      const s = JSON.stringify({ t:'wavesync', from:ws.uid, active:m.active?1:0, n:+m.n||0,
+      const s = JSON.stringify({ t:'wavesync', from:ws.uid, active:m.active?1:0, n:+m.n||0, won:(m.won?1:0),
         heart:+m.heart||0, hmax:+m.hmax||100, mobs:Array.isArray(m.mobs)?m.mobs.slice(0,60):[] });
       for (const p of room.players.values()) if (p.uid!==ws.uid && p.ws.readyState===1) p.ws.send(s);
     }
@@ -453,6 +453,9 @@ wss.on('connection', (ws)=>{
     }
     else if ((m.t === 'pdeath' || m.t === 'previve') && ws.room){   // a hero announces their own knockout / revival → everyone watching sees it (wave mobs are client-side, so hp alone won't show it)
       broadcast(ws.room, { t: m.t, uid: ws.uid });
+    }
+    else if (m.t === 'gsurrender' && ws.room){   // a downed guildmate forfeits → tell the host to end the wave as a loss for everyone
+      broadcast(ws.room, { t:'gsurrender', uid: ws.uid });
     }
     else if (m.t === 'respawn' && ws.room){            // client told us the player respawned
       const p = rooms.get(ws.room)?.players.get(ws.uid); if (p){ p.hp = p.mh; p.dead=false; if(m.x)p.sx=p.x=+m.x; if(m.y)p.sy=p.y=+m.y; }
