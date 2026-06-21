@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v26-guildsync';   // bump on each deploy so clients can confirm what's live
+const SERVER_VERSION = 'v29-dash3modes';   // + elycidash NORMAL/HC boards, map seed & collisions
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -85,10 +85,21 @@ const SCORE_GAMES = {
       return [ { path:'scores/bears', val:{ score, wave, won, kills, bossK, t }, better:(n,o)=>!o || n.score > (o.score||0) } ];
     },
   elycidash: (b)=>{ const rounds=clampI(b.rounds,0,10), done=b.done?1:0, t=clampF(b.t,0,99999),
-      berries=clampI(b.berries,0,99999), combo=clampI(b.combo,0,9999);
+      deaths=clampI(b.deaths,0,9999), seed=clampI(b.seed,0,9), berries=clampI(b.berries,0,99999), combo=clampI(b.combo,0,9999);
       // rounds reached/finished dominate (top band), then faster time, then berries & combo as small bonuses
       const score=(Math.min(rounds,10)+done)*1e7 + Math.max(0, 1e6 - Math.round(t*10)) + berries*10 + combo*30;
-      return [ { path:'scores/elycidash', val:{score,rounds,t:Math.round(t*10)/10,berries,combo,done}, better:(n,o)=>!o||n.score>(o.score||0) } ];
+      return [ { path:'scores/elycidash', val:{score,rounds,t:Math.round(t*10)/10,deaths,seed,berries,combo,done}, better:(n,o)=>!o||n.score>(o.score||0) } ];
+    },
+  'elycidash-ez': (b)=>{ const rounds=clampI(b.rounds,0,10), done=b.done?1:0, t=clampF(b.t,0,99999),
+      deaths=clampI(b.deaths,0,9999), seed=clampI(b.seed,0,9), berries=clampI(b.berries,0,99999), combo=clampI(b.combo,0,9999);
+      const score=(Math.min(rounds,10)+done)*1e7 + Math.max(0, 1e6 - Math.round(t*10)) + berries*10 + combo*30;
+      return [ { path:'scores/elycidash-ez', val:{score,rounds,t:Math.round(t*10)/10,deaths,seed,berries,combo,done}, better:(n,o)=>!o||n.score>(o.score||0) } ];
+    },
+  'elycidash-hc': (b)=>{ const rounds=clampI(b.rounds,0,10), done=b.done?1:0, t=clampF(b.t,0,99999),
+      deaths=clampI(b.deaths,0,9999), seed=clampI(b.seed,0,9), berries=clampI(b.berries,0,99999), combo=clampI(b.combo,0,9999);
+      // HARDCORE: reaching deeper rounds (with only 3 lives) dominates, then faster time
+      const score=(Math.min(rounds,10)+done)*1e7 + Math.max(0, 1e6 - Math.round(t*10)) + berries*10 + combo*30;
+      return [ { path:'scores/elycidash-hc', val:{score,rounds,t:Math.round(t*10)/10,deaths,seed,berries,combo,done}, better:(n,o)=>!o||n.score>(o.score||0) } ];
     },
 };
 async function submitScore(body){
@@ -115,6 +126,45 @@ async function submitScore(body){
     if (row.better(next, cur)){ await ref.set(next); wrote++; }
   }
   return { ok:true, wrote };
+}
+
+// ══════════ ELYCI DASH — authoritative race presence (HTTP, validated) ══════════
+// Clients POST their race position every ~0.6s; the server sanity-checks it (no teleporting / backward
+// jumps), stores it per room (= the party's matchmaking instance), and returns the 8 nearest riders.
+function dashRoundLen(r){ return Math.round((110+r*16)*1.5625); }
+const DASH_OFF = (()=>{ const a=[0]; let s=0; for(let r=1;r<=10;r++){ s+=dashRoundLen(r); a[r]=s; } return a; })();
+const dashRooms = new Map();   // room -> Map(uid -> {uid,n,av,r,d,lane,lv,done,prog,ts})
+function dashPut(room, uid, st){
+  let R = dashRooms.get(room); if (!R){ R = new Map(); dashRooms.set(room, R); }
+  const now = Date.now(), prog = DASH_OFF[st.r-1] + st.d, prev = R.get(uid);
+  if (prev){
+    const dtv = Math.max(0.05, (now-prev.ts)/1000), maxAdv = dtv*42 + 6;   // ~42 slices/s hard ceiling
+    if (prog > prev.prog + maxAdv) return;                                 // impossible forward leap → ignore (keep last good)
+    if (prog < prev.prog - 4 && !(st.r===1 && st.d < 25)) return;          // backward (and not a fresh race) → ignore
+  }
+  R.set(uid, { uid, n:st.n, av:st.av, r:st.r, d:st.d, lane:st.lane, lv:st.lv, done:st.done, prog, ts:now });
+}
+function dashPeers(room, uid){
+  const R = dashRooms.get(room); if (!R) return [];
+  const now = Date.now(), me = R.get(uid), my = me ? me.prog : 0, out = [];
+  for (const [u,s] of R){ if (u===uid || now-s.ts > 10000) continue; out.push(s); }
+  out.sort((a,b)=> Math.abs(a.prog-my) - Math.abs(b.prog-my));            // the 8 riders nearest YOU
+  return out.slice(0,8).map(s=>({ uid:s.uid, n:s.n, av:s.av, r:s.r, d:s.d, lane:s.lane, lv:s.lv, done:s.done }));
+}
+setInterval(()=>{ const now=Date.now();
+  dashRooms.forEach((R,key)=>{ for (const [u,s] of R) if (now-s.ts > 15000) R.delete(u); if (R.size===0) dashRooms.delete(key); });
+}, 8000);
+async function dashPresence(body){
+  let uid;
+  if (adminAuth){ if (!body.token) return { ok:false, error:'auth required' };
+    try { uid = (await adminAuth.verifyIdToken(String(body.token))).uid; } catch(e){ return { ok:false, error:'bad token' }; } }
+  else uid = cleanUid(body.uid);
+  if (!uid) return { ok:false, error:'bad uid' };
+  const room = String(body.room||'elycidash-ez').slice(0,64);
+  const st = { n:cleanName(body.name), av:(body.av && typeof body.av==='object') ? body.av : {},
+    r:clampI(body.r,1,10), d:clampF(body.d,0,9999), lane:clampI(body.lane,0,2), lv:clampI(body.lv,0,2), done:body.done?1:0 };
+  dashPut(room, uid, st);
+  return { ok:true, peers: dashPeers(room, uid) };
 }
 const TICK_HZ = 20;                 // server simulation rate
 const NET_HZ = 15;                  // state broadcast rate
@@ -153,7 +203,7 @@ const playerParty = new Map();
 // INST_CAP human players. When an instance fills, the next player opens a new one. A party
 // ALWAYS lands in one instance together: when the first member joins we reserve slots for the
 // rest, and a party of N never squeezes into an instance with fewer than N free slots.
-const MM_GAMES = new Set(['crossing','crossing-hc','crossing-ez','elycidash','dragonspire','dragonspire-hc','dragonspire-ez']);   // dragonspire = the climber game
+const MM_GAMES = new Set(['crossing','crossing-hc','crossing-ez','elycidash','elycidash-ez','elycidash-hc','dragonspire','dragonspire-hc','dragonspire-ez']);   // dragonspire = the climber game
 const INST_CAP = 10;                                           // max HUMAN players per instance
 const RESERVE_MS = 90000;                                      // hold a party-mate's slot this long
 const AFK_MS = +process.env.AFK_MS || 1800000;                                         // 10 min with no movement/action → kicked (frees bandwidth)
@@ -255,6 +305,18 @@ const server = http.createServer((req,res)=>{
       let body; try { body=JSON.parse(data||'{}'); } catch(e){ res.end(JSON.stringify({ok:false,error:'bad json'})); return; }
       try { const r=await submitScore(body); res.end(JSON.stringify(r)); }
       catch(e){ console.error('[score] write failed:', e.message); res.end(JSON.stringify({ok:false,error:'server error'})); }
+    });
+    return;
+  }
+  if (req.method==='POST' && (req.url==='/dash-presence')){
+    let data=''; let tooBig=false;
+    req.on('data',c=>{ data+=c; if (data.length>4096){ tooBig=true; req.destroy(); } });
+    req.on('end', async ()=>{
+      res.writeHead(200, Object.assign({'content-type':'application/json'}, cors));
+      if (tooBig){ res.end(JSON.stringify({ok:false,error:'payload too large'})); return; }
+      let body; try { body=JSON.parse(data||'{}'); } catch(e){ res.end(JSON.stringify({ok:false,error:'bad json'})); return; }
+      try { const r=await dashPresence(body); res.end(JSON.stringify(r)); }
+      catch(e){ res.end(JSON.stringify({ok:false,error:'server error'})); }
     });
     return;
   }
