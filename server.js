@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v29-dash3modes';   // + elycidash NORMAL/HC boards, map seed & collisions
+const SERVER_VERSION = 'v30-dashmapseed';   // + elycidash NORMAL/HC boards, map seed & collisions
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -88,18 +88,18 @@ const SCORE_GAMES = {
       deaths=clampI(b.deaths,0,9999), seed=clampI(b.seed,0,9), berries=clampI(b.berries,0,99999), combo=clampI(b.combo,0,9999);
       // rounds reached/finished dominate (top band), then faster time, then berries & combo as small bonuses
       const score=(Math.min(rounds,10)+done)*1e7 + Math.max(0, 1e6 - Math.round(t*10)) + berries*10 + combo*30;
-      return [ { path:'scores/elycidash', val:{score,rounds,t:Math.round(t*10)/10,deaths,seed,berries,combo,done}, better:(n,o)=>!o||n.score>(o.score||0) } ];
+      return [ { path:'scores/elycidash', k:'_m'+seed, val:{score,rounds,t:Math.round(t*10)/10,deaths,seed,berries,combo,done}, better:(n,o)=>!o||n.score>(o.score||0) } ];
     },
   'elycidash-ez': (b)=>{ const rounds=clampI(b.rounds,0,10), done=b.done?1:0, t=clampF(b.t,0,99999),
       deaths=clampI(b.deaths,0,9999), seed=clampI(b.seed,0,9), berries=clampI(b.berries,0,99999), combo=clampI(b.combo,0,9999);
       const score=(Math.min(rounds,10)+done)*1e7 + Math.max(0, 1e6 - Math.round(t*10)) + berries*10 + combo*30;
-      return [ { path:'scores/elycidash-ez', val:{score,rounds,t:Math.round(t*10)/10,deaths,seed,berries,combo,done}, better:(n,o)=>!o||n.score>(o.score||0) } ];
+      return [ { path:'scores/elycidash-ez', k:'_m'+seed, val:{score,rounds,t:Math.round(t*10)/10,deaths,seed,berries,combo,done}, better:(n,o)=>!o||n.score>(o.score||0) } ];
     },
   'elycidash-hc': (b)=>{ const rounds=clampI(b.rounds,0,10), done=b.done?1:0, t=clampF(b.t,0,99999),
       deaths=clampI(b.deaths,0,9999), seed=clampI(b.seed,0,9), berries=clampI(b.berries,0,99999), combo=clampI(b.combo,0,9999);
       // HARDCORE: reaching deeper rounds (with only 3 lives) dominates, then faster time
       const score=(Math.min(rounds,10)+done)*1e7 + Math.max(0, 1e6 - Math.round(t*10)) + berries*10 + combo*30;
-      return [ { path:'scores/elycidash-hc', val:{score,rounds,t:Math.round(t*10)/10,deaths,seed,berries,combo,done}, better:(n,o)=>!o||n.score>(o.score||0) } ];
+      return [ { path:'scores/elycidash-hc', k:'_m'+seed, val:{score,rounds,t:Math.round(t*10)/10,deaths,seed,berries,combo,done}, better:(n,o)=>!o||n.score>(o.score||0) } ];
     },
 };
 async function submitScore(body){
