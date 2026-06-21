@@ -12,7 +12,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v30-dashmapseed';   // + elycidash NORMAL/HC boards, map seed & collisions
+const SERVER_VERSION = 'v31-ratings';   // + elycidash NORMAL/HC boards, map seed & collisions
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -370,6 +370,13 @@ wss.on('connection', (ws)=>{
       send(ws, { t:'joined', room: ws.room, ver: SERVER_VERSION, proto: PROTOCOL });
       if (ws.room === 'town'){ const _now=Date.now();
         send(ws, { t:'townstate', cut:Object.keys(TOWN.cut), ores:TOWN.ores.map(o=>({id:o.id, rem:Math.max(0,(o.up-_now))/1000})) }); }
+    }
+    else if (m.t === 'rate'){                              // game thumbs up/down — server owns the write (clients read-only)
+      if (!adminDb || !ws.uid) return;
+      const game = String(m.game||'').slice(0,32).replace(/[^a-z0-9-]/g,'');
+      const vote = (m.vote==='up'||m.vote==='down') ? m.vote : null;
+      if (!game || !vote) return;
+      try { await adminDb.ref('bici/ratings/'+game+'/'+ws.uid).set(vote); } catch(e){}
     }
     else if (m.t === 'wavesync' && ws.room){              // guild-wave host → other members in the same room
       const room = rooms.get(ws.room); if(!room) return;
