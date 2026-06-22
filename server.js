@@ -12,7 +12,10 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v31-ratings';   // + elycidash NORMAL/HC boards, map seed & collisions
+const SERVER_VERSION = 'v33-minclient';
+// Minimum CLIENT build allowed to play. Bump this (and the client's CLIENT_BUILD) on a release
+// to lock out everyone on an older client — enforced the instant they (re)connect.
+const MIN_CLIENT = 'v10.55';
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
@@ -367,7 +370,7 @@ wss.on('connection', (ws)=>{
         duel: null,
         sx:+m.x||0, sy:+m.y||0, last: Date.now(), dead:false
       });
-      send(ws, { t:'joined', room: ws.room, ver: SERVER_VERSION, proto: PROTOCOL });
+      send(ws, { t:'joined', room: ws.room, ver: SERVER_VERSION, proto: PROTOCOL, minClient: MIN_CLIENT });
       if (ws.room === 'town'){ const _now=Date.now();
         send(ws, { t:'townstate', cut:Object.keys(TOWN.cut), ores:TOWN.ores.map(o=>({id:o.id, rem:Math.max(0,(o.up-_now))/1000})) }); }
     }
