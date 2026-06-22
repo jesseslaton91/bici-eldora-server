@@ -12,10 +12,10 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8787;
-const SERVER_VERSION = 'v33-minclient';
+const SERVER_VERSION = 'v35-minclient';
 // Minimum CLIENT build allowed to play. Bump this (and the client's CLIENT_BUILD) on a release
 // to lock out everyone on an older client — enforced the instant they (re)connect.
-const MIN_CLIENT = 'v10.55';
+const MIN_CLIENT = 'v10.57';
 const PROTOCOL=2;   // bump when clients MUST refresh; client compares against its EXPECTED_PROTO
 // ── optional Firebase token verification (set FIREBASE_SERVICE_ACCOUNT env to enable) ──
 let adminAuth = null, adminDb = null;
